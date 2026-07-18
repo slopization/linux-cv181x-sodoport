@@ -250,7 +250,7 @@
 			interrupts = <SOC_PERIPHERAL_IRQ(15) IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-names = "macirq";
 			phy-handle = <&internal_ephy>;
-			phy-mode = "internal";
+			phy-mode = "rmii";
 			resets = <&rst RST_ETH0>;
 			reset-names = "stmmaceth";
 			rx-fifo-depth = <8192>;
