@@ -262,6 +262,10 @@ static int cv1800_pconf_get(struct pinctrl_dev *pctldev,
 	value = readl(cv1800_pinctrl_get_component_addr(priv, &pin->conf));
 
 	switch (param) {
+	case PIN_CONFIG_BIAS_DISABLE:
+		enabled = !(value & (PIN_IO_PULLUP | PIN_IO_PULLDOWN));
+		arg = 0;
+		break;
 	case PIN_CONFIG_BIAS_PULL_DOWN:
 		enabled = FIELD_GET(PIN_IO_PULLDOWN, value);
 		arg = sophgo_pinctrl_typical_pull_down(pctrl, sp, priv->power_cfg);
@@ -332,6 +336,10 @@ static int cv1800_pinconf_compute_config(struct sophgo_pinctrl *pctrl,
 		u32 arg = pinconf_to_config_argument(configs[i]);
 
 		switch (param) {
+		case PIN_CONFIG_BIAS_DISABLE:
+			v &= ~(PIN_IO_PULLUP | PIN_IO_PULLDOWN);
+			m |= PIN_IO_PULLUP | PIN_IO_PULLDOWN;
+			break;
 		case PIN_CONFIG_BIAS_PULL_DOWN:
 			v &= ~PIN_IO_PULLDOWN;
 			v |= FIELD_PREP(PIN_IO_PULLDOWN, arg);
