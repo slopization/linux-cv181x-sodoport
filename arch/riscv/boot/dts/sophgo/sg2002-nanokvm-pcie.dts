@@ -229,6 +229,10 @@
 	status = "okay";
 };
 
+&vpu {
+	status = "okay";
+};
+
 &{/soc} {
 	csi: csi@a0c2000 {
 		compatible = "sophgo,sg2002-csi";
