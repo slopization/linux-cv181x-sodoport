@@ -175,21 +175,6 @@
 	status = "okay";
 };
 
-&i2c1 {
-	clock-frequency = <100000>;
-	status = "okay";
-};
-
-&i2c2 {
-	clock-frequency = <100000>;
-	status = "okay";
-};
-
-&i2c3 {
-	clock-frequency = <100000>;
-	status = "okay";
-};
-
 &i2c4 {
 	pinctrl-0 = <&i2c4_cfg>;
 	pinctrl-names = "default";
