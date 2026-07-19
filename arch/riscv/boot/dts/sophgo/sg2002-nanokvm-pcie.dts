@@ -213,10 +213,13 @@
 		pinctrl-names = "default";
 
 		oled@3c {
-			compatible = "solomon,ssd1306fb-i2c";
+			compatible = "solomon,ssd1306";
 			reg = <0x3c>;
 			reset-gpios = <&porta 22 GPIO_ACTIVE_LOW>;
-			status = "disabled";
+			solomon,width = <64>;
+			solomon,height = <32>;
+			solomon,col-offset = <32>;
+			solomon,page-offset = <0>;
 		};
 	};
 };
