@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/sophgo,cv1800b-wave420l.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Sophgo CV1800B Wave420L video codec
+
+maintainers: []
+
+description:
+  CV1800B integrates a Wave420L video codec block that is controlled by the
+  Chips&Media V4L2 mem2mem driver.
+
+properties:
+  compatible:
+    const: sophgo,cv1800b-wave420l
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    minItems: 5
+    maxItems: 7
+
+  clock-names:
+    minItems: 5
+    maxItems: 7
+
+  resets:
+    minItems: 1
+    maxItems: 3
+
+  reset-names:
+    minItems: 1
+    maxItems: 3
+
+  sram:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Optional SRAM region for reference data.
+
+  sram-size:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Size in bytes of an internal SRAM window used when no SRAM phandle is
+      provided.
+
+  sophgo,syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to TOP syscon used for SG2002 video codec SRAM/remap controls.
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+
+additionalProperties: false
+
+examples:
+  - |
+    vpu: video-codec@b020000 {
+        compatible = "sophgo,cv1800b-wave420l";
+        reg = <0x0b020000 0x10000>;
+        interrupts = <22>;
+        clocks = <&clk 137>, <&clk 143>, <&clk 144>,
+                 <&clk 145>, <&clk 146>, <&clk 147>, <&clk 148>;
+        clock-names = "clk_axi_video_codec",
+                      "clk_h265c",
+                      "clk_apb_h265c",
+                      "clk_vc_src0",
+                      "clk_vc_src1",
+                      "clk_vc_src2",
+                      "clk_cfg_reg_vc";
+        resets = <&rst 5>, <&rst 95>;
+        reset-names = "h265c", "vcsys";
+        sram-size = <0x19400>;
+    };

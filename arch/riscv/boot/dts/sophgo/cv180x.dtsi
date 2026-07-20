@@ -466,6 +466,31 @@
 			status = "disabled";
 		};
 
+		vpu: video-codec@b020000 {
+			compatible = "sophgo,cv1800b-wave420l";
+			reg = <0x0b020000 0x10000>;
+			interrupts = <SOC_PERIPHERAL_IRQ(6) IRQ_TYPE_LEVEL_HIGH>;
+			sram-size = <0x19400>;
+			sophgo,syscon = <&syscon>;
+			clocks = <&clk CLK_AXI_VIDEO_CODEC>,
+				 <&clk CLK_H265C>,
+				 <&clk CLK_APB_H265C>,
+				 <&clk CLK_VC_SRC0>,
+				 <&clk CLK_VC_SRC1>,
+				 <&clk CLK_VC_SRC2>,
+				 <&clk CLK_CFG_REG_VC>;
+			clock-names = "clk_axi_video_codec",
+				      "clk_h265c",
+				      "clk_apb_h265c",
+				      "clk_vc_src0",
+				      "clk_vc_src1",
+				      "clk_vc_src2",
+				      "clk_cfg_reg_vc";
+			resets = <&rst RST_H265C>, <&rst RST_VCSYS>;
+			reset-names = "h265c", "vcsys";
+			status = "disabled";
+		};
+
 		rtc@5025000 {
 			compatible = "sophgo,cv1800b-rtc", "syscon";
 			reg = <0x5025000 0x2000>;
