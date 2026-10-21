@@ -1700,6 +1700,7 @@ static int wave4_set_enc_openparam(struct enc_open_param *open_param,
 	open_param->wave_param.min_qp_b = input.min_qp_b;
 	open_param->wave_param.max_qp_b = input.max_qp_b;
 	open_param->wave_param.disable_deblk = input.disable_deblk;
+	open_param->wave_param.sao_enable = input.sao_enable;
 	open_param->wave_param.lf_cross_slice_boundary_enable =
 		input.lf_cross_slice_boundary_enable;
 	open_param->wave_param.tc_offset_div2 = input.tc_offset_div2;
