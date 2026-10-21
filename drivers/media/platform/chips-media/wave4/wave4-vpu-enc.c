@@ -741,7 +741,12 @@ static int wave4_vpu_enc_try_fmt_cap(struct file *file, void *fh, struct v4l2_fo
 static int wave4_vpu_enc_s_fmt_cap(struct file *file, void *fh, struct v4l2_format *f)
 {
 	struct vpu_instance *inst = file_to_vpu_inst(file);
+	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
 	int i, ret;
+
+	if (vb2_is_busy(v4l2_m2m_get_src_vq(m2m_ctx)) ||
+	    vb2_is_busy(v4l2_m2m_get_dst_vq(m2m_ctx)))
+		return -EBUSY;
 
 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
 		__func__, f->fmt.pix_mp.pixelformat, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
@@ -847,9 +852,14 @@ static int wave4_vpu_enc_try_fmt_out(struct file *file, void *fh, struct v4l2_fo
 static int wave4_vpu_enc_s_fmt_out(struct file *file, void *fh, struct v4l2_format *f)
 {
 	struct vpu_instance *inst = file_to_vpu_inst(file);
+	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
 	const struct vpu_format *vpu_fmt;
 	const struct v4l2_format_info *info;
 	int i, ret;
+
+	if (vb2_is_busy(v4l2_m2m_get_src_vq(m2m_ctx)) ||
+	    vb2_is_busy(v4l2_m2m_get_dst_vq(m2m_ctx)))
+		return -EBUSY;
 
 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
 		__func__, f->fmt.pix_mp.pixelformat, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
