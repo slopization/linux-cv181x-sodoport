@@ -2447,10 +2447,10 @@ int wave4_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 	    !(p_enc_info->rotation_angle == 180 &&
 	    p_enc_info->mirror_direction == MIRDIR_HOR_VER)) {
 		luma_stride = calculate_luma_stride(buf_width, bit_depth);
-		chroma_stride = calculate_chroma_stride(buf_width / 2, bit_depth);
+		chroma_stride = calculate_chroma_stride(buf_width, bit_depth);
 	} else {
 		luma_stride = calculate_luma_stride(p_open_param->pic_width, bit_depth);
-		chroma_stride = calculate_chroma_stride(p_open_param->pic_width / 2, bit_depth);
+		chroma_stride = calculate_chroma_stride(p_open_param->pic_width, bit_depth);
 	}
 
 	vpu_write_reg(inst->dev, W4_FBC_STRIDE, luma_stride << 16 | chroma_stride);
