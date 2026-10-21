@@ -2523,7 +2523,7 @@ static u32 wave4_vpu_enc_validate_sec_axi(struct vpu_instance *inst, u32 *sec_ax
 	struct enc_open_param *p_open_param = &p_enc_info->open_param;
 	u32 imd_size = 0, rdo_size = 0, lf_size = 0;
 	u32 ret = 0, used = 0;
-	u32 sram_size = inst->dev->sram_size;
+	u32 sram_size = inst->dev->sram_buf.size;
 	u32 width = p_open_param->pic_width ?: inst->src_fmt.width;
 	u32 lf_luma = 5, lf_chroma = 3;
 
