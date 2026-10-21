@@ -717,7 +717,6 @@ static int wave4_vpu_enc_try_fmt_cap(struct file *file, void *fh, struct v4l2_fo
 	struct vpu_instance *inst = file_to_vpu_inst(file);
 	const struct v4l2_frmsize_stepwise *frmsize;
 	const struct vpu_format *vpu_fmt;
-	int width, height;
 
 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
 		__func__, f->fmt.pix_mp.pixelformat, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
@@ -725,19 +724,15 @@ static int wave4_vpu_enc_try_fmt_cap(struct file *file, void *fh, struct v4l2_fo
 
 	vpu_fmt = wave4_find_vpu_fmt(f->fmt.pix_mp.pixelformat, enc_fmt_list[VPU_FMT_TYPE_CODEC]);
 	if (!vpu_fmt) {
-		width = inst->dst_fmt.width;
-		height = inst->dst_fmt.height;
 		f->fmt.pix_mp.pixelformat = inst->dst_fmt.pixelformat;
 		frmsize = &enc_frmsize[VPU_FMT_TYPE_CODEC];
 	} else {
-		width = f->fmt.pix_mp.width;
-		height = f->fmt.pix_mp.height;
 		f->fmt.pix_mp.pixelformat = vpu_fmt->v4l2_pix_fmt;
 		frmsize = vpu_fmt->v4l2_frmsize;
 	}
 
 	wave4_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_CODEC,
-			     width, height, frmsize);
+			     inst->conf_win.width, inst->conf_win.height, frmsize);
 	f->fmt.pix_mp.colorspace = inst->colorspace;
 	f->fmt.pix_mp.ycbcr_enc = inst->ycbcr_enc;
 	f->fmt.pix_mp.quantization = inst->quantization;
@@ -936,8 +931,8 @@ static int wave4_vpu_enc_g_selection(struct file *file, void *fh, struct v4l2_se
 	case V4L2_SEL_TGT_CROP_BOUNDS:
 		s->r.left = 0;
 		s->r.top = 0;
-		s->r.width = inst->dst_fmt.width;
-		s->r.height = inst->dst_fmt.height;
+		s->r.width = inst->src_fmt.width;
+		s->r.height = inst->src_fmt.height;
 		break;
 	case V4L2_SEL_TGT_CROP:
 		s->r.left = 0;
@@ -955,22 +950,49 @@ static int wave4_vpu_enc_g_selection(struct file *file, void *fh, struct v4l2_se
 static int wave4_vpu_enc_s_selection(struct file *file, void *fh, struct v4l2_selection *s)
 {
 	struct vpu_instance *inst = file_to_vpu_inst(file);
+	struct v4l2_pix_format_mplane dst_fmt = inst->dst_fmt;
+	struct vb2_queue *dst_vq = v4l2_m2m_get_dst_vq(inst->v4l2_fh.m2m_ctx);
+	u32 width, height;
 
 	if (s->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)
 		return -EINVAL;
 
 	if (s->target != V4L2_SEL_TGT_CROP)
 		return -EINVAL;
+	if (inst->state != VPU_INST_STATE_NONE)
+		return -EBUSY;
 
 	dev_dbg(inst->dev->dev, "%s: V4L2_SEL_TGT_CROP width: %u | height: %u\n",
 		__func__, s->r.width, s->r.height);
 
+	width = clamp_val(s->r.width, W4_MIN_ENC_PIC_WIDTH, inst->src_fmt.width);
+	height = clamp_val(s->r.height, W4_MIN_ENC_PIC_HEIGHT, inst->src_fmt.height);
+	if (s->flags & V4L2_SEL_FLAG_GE) {
+		width = round_up(width, W4_ENC_CODEC_STEP_WIDTH);
+		height = round_up(height, W4_ENC_CODEC_STEP_HEIGHT);
+	} else if (s->flags & V4L2_SEL_FLAG_LE) {
+		width = round_down(width, W4_ENC_CODEC_STEP_WIDTH);
+		height = round_down(height, W4_ENC_CODEC_STEP_HEIGHT);
+	} else {
+		width = round_down(width + W4_ENC_CODEC_STEP_WIDTH / 2,
+				   W4_ENC_CODEC_STEP_WIDTH);
+		height = round_down(height + W4_ENC_CODEC_STEP_HEIGHT / 2,
+				    W4_ENC_CODEC_STEP_HEIGHT);
+	}
+
+	wave4_update_pix_fmt(&dst_fmt, VPU_FMT_TYPE_CODEC, width, height,
+			     &enc_frmsize[VPU_FMT_TYPE_CODEC]);
+	if (vb2_is_busy(dst_vq) &&
+	    dst_fmt.plane_fmt[0].sizeimage > inst->dst_fmt.plane_fmt[0].sizeimage)
+		return -EBUSY;
+
 	s->r.left = 0;
 	s->r.top = 0;
-	s->r.width = min(s->r.width, inst->dst_fmt.width);
-	s->r.height = min(s->r.height, inst->dst_fmt.height);
+	s->r.width = width;
+	s->r.height = height;
 
 	inst->conf_win = s->r;
+	inst->dst_fmt = dst_fmt;
 
 	return 0;
 }
