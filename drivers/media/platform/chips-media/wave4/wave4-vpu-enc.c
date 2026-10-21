@@ -326,7 +326,7 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	if (wave4_vpu_enc_is_packed_422(inst->src_fmt.pixelformat)) {
 		luma_size = inst->src_fmt.plane_fmt[0].sizeimage;
 	} else if (info->mem_planes == 1) {
-		luma_size = stride * inst->dst_fmt.height;
+		luma_size = stride * inst->src_fmt.height;
 		chroma_size = luma_size / (info->hdiv * info->vdiv);
 	} else {
 		luma_size = inst->src_fmt.plane_fmt[0].sizeimage;
