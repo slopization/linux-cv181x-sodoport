@@ -1931,7 +1931,7 @@ static int wave4_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count
 		m2m_ctx->out_q_ctx.q.streaming, m2m_ctx->cap_q_ctx.q.streaming,
 		other_q_streaming);
 
-	if (inst->state == VPU_INST_STATE_NONE && q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+	if (inst->state == VPU_INST_STATE_NONE && other_q_streaming) {
 		struct enc_open_param open_param;
 
 		memset(&open_param, 0, sizeof(struct enc_open_param));
