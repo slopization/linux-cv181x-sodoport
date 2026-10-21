@@ -2048,6 +2048,48 @@ static void streamoff_capture(struct vpu_instance *inst, struct vb2_queue *q)
 	v4l2_m2m_clear_state(m2m_ctx);
 }
 
+/*
+ * Destroy the firmware instance and everything registered for it, leaving the
+ * instance ready to be opened again with a fresh configuration snapshot.
+ * Only call this once the hardware has been drained.
+ */
+static void wave4_vpu_enc_reset_session(struct vpu_instance *inst)
+{
+	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
+	u32 fail_res = 0;
+	int i, ret;
+
+	if (inst->state == VPU_INST_STATE_NONE)
+		return;
+
+	ret = wave4_vpu_enc_close(inst, &fail_res);
+	if (ret) {
+		/*
+		 * The firmware may still reference the registered buffers. Keep
+		 * them and the instance state so the buffers are not freed while
+		 * in use.
+		 */
+		dev_err(inst->dev->dev, "%s: destroying the encoder failed: %d (%#x)\n",
+			__func__, ret, fail_res);
+		return;
+	}
+
+	for (i = 0; i < inst->fbc_buf_count; i++)
+		wave4_vpu_dec_reset_framebuffer(inst, i);
+
+	wave4_vdi_free_dma_memory(inst->dev, &inst->bitstream_vbuf);
+	memset(&inst->frame_buf, 0, sizeof(inst->frame_buf));
+	inst->fbc_buf_count = 0;
+	inst->min_src_buf_count = 0;
+	p_enc_info->stride = 0;
+	p_enc_info->num_frame_buffers = 0;
+	p_enc_info->initial_info_obtained = false;
+
+	dev_dbg(inst->dev->dev, "%s: encoder session reset from %s\n",
+		__func__, state_to_str(inst->state));
+	inst->state = VPU_INST_STATE_NONE;
+}
+
 static void wave4_vpu_enc_stop_streaming(struct vb2_queue *q)
 {
 	struct vpu_instance *inst = vb2_get_drv_priv(q);
@@ -2072,10 +2114,16 @@ static void wave4_vpu_enc_stop_streaming(struct vb2_queue *q)
 	}
 	p_enc_info->stop_pending = true;
 
-	if (wave4_vpu_both_queues_are_streaming(inst))
+	/*
+	 * Keep the firmware from accepting further work while draining. Only a
+	 * CAPTURE stop resets the session; an OUTPUT stop pauses the stream and
+	 * must keep the firmware state and its reference pictures.
+	 */
+	if (q->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+	    wave4_vpu_both_queues_are_streaming(inst))
 		switch_state(inst, VPU_INST_STATE_STOP);
 
-	while (check_cmd) {
+	while (check_cmd && inst->state != VPU_INST_STATE_NONE) {
 		struct queue_status_info q_status;
 		struct enc_output_info enc_output_info;
 
@@ -2101,10 +2149,12 @@ static void wave4_vpu_enc_stop_streaming(struct vb2_queue *q)
 	 */
 	wave4_vpu_enc_flush_src_meta(inst, VB2_BUF_STATE_ERROR);
 
-	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		streamoff_output(inst, q);
-	else
+	} else {
 		streamoff_capture(inst, q);
+		wave4_vpu_enc_reset_session(inst);
+	}
 
 	wave4_vpu_enc_put_async_pm(inst);
 	pm_runtime_put_autosuspend(inst->dev->dev);
@@ -2227,10 +2277,12 @@ static void wave4_vpu_enc_job_abort(void *priv)
 	 * Crash-guard: if a running ENC_PIC job never reports completion,
 	 * v4l2_m2m_cancel_job() waits forever in release/streamoff.
 	 * Force-finish the running m2m job so teardown can proceed.
+	 *
+	 * The instance state is deliberately left alone: a CAPTURE stop resets
+	 * the session, while an OUTPUT-only stop must be able to resume the
+	 * same firmware instance without re-registering its buffers.
 	 */
 	p_enc_info->stop_pending = true;
-	if (inst->state == VPU_INST_STATE_PIC_RUN)
-		switch_state(inst, VPU_INST_STATE_STOP);
 	wave4_vpu_enc_put_async_pm(inst);
 	v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
 }
