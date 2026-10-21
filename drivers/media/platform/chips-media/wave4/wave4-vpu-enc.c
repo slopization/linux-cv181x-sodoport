@@ -5,6 +5,8 @@
  * Copyright (C) 2021-2023 CHIPS&MEDIA INC
  */
 
+#include <linux/limits.h>
+#include <linux/math.h>
 #include <linux/pm_runtime.h>
 #include "wave4-helper.h"
 
@@ -1039,12 +1041,13 @@ static int wave4_vpu_enc_s_parm(struct file *file, void *fh, struct v4l2_streamp
 
 	a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
 	if (a->parm.output.timeperframe.denominator && a->parm.output.timeperframe.numerator) {
-		inst->frame_rate = a->parm.output.timeperframe.denominator /
-				   a->parm.output.timeperframe.numerator;
-	} else {
-		a->parm.output.timeperframe.numerator = 1;
-		a->parm.output.timeperframe.denominator = inst->frame_rate;
+		u32 rate = DIV_ROUND_CLOSEST_ULL((u64)a->parm.output.timeperframe.denominator,
+					       a->parm.output.timeperframe.numerator);
+
+		inst->frame_rate = clamp_val(rate, 1, U16_MAX);
 	}
+	a->parm.output.timeperframe.numerator = 1;
+	a->parm.output.timeperframe.denominator = inst->frame_rate;
 
 	dev_dbg(inst->dev->dev, "%s: numerator: %u | denominator: %u\n",
 		__func__, a->parm.output.timeperframe.numerator,

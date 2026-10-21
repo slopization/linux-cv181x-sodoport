@@ -575,7 +575,7 @@ struct enc_open_param {
 	unsigned int bitstream_buffer_size;
 	u32 pic_width; /* width of a picture to be encoded in unit of sample */
 	u32 pic_height; /* height of a picture to be encoded in unit of sample */
-	u32 frame_rate_info;/* desired fps */
+	u32 frame_rate_info; /* [15:0] numerator, [31:16] denominator minus one */
 	u32 vbv_buffer_size;
 	u32 initial_delay; /* initial CPB removal delay in milliseconds */
 	u32 bit_rate; /* target bitrate in bps */
