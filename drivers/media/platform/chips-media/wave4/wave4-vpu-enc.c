@@ -1291,12 +1291,6 @@ static int wave4_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 		case V4L2_MPEG_VIDEO_HEVC_LEVEL_5:
 			inst->enc_param.level = 50;
 			break;
-		case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1:
-			inst->enc_param.level = 51;
-			break;
-		case V4L2_MPEG_VIDEO_HEVC_LEVEL_5_2:
-			inst->enc_param.level = 52;
-			break;
 		default:
 			return -EINVAL;
 		}
@@ -2240,8 +2234,8 @@ static int wave4_vpu_open_enc(struct file *filp)
 			       V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
 	v4l2_ctrl_new_std_menu(v4l2_ctrl_hdl, &wave4_vpu_enc_ctrl_ops,
 			       V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
-			       V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1, 0,
-			       V4L2_MPEG_VIDEO_HEVC_LEVEL_1);
+			       V4L2_MPEG_VIDEO_HEVC_LEVEL_5, 0,
+			       V4L2_MPEG_VIDEO_HEVC_LEVEL_5);
 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave4_vpu_enc_ctrl_ops,
 			  V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
 			  0, 51, 1, 8);

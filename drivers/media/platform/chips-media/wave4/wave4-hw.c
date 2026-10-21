@@ -2986,6 +2986,67 @@ static bool wave4_vpu_enc_check_param_valid(struct vpu_device *vpu_dev,
 	return true;
 }
 
+struct wave4_hevc_level {
+	u32 level;
+	u32 max_luma_ps;
+	u32 max_luma_sr;
+	u32 max_br_main;
+	u32 max_br_high;
+};
+
+/* HEVC Annex A limits; bitrate columns are in kbit/s. */
+static const struct wave4_hevc_level wave4_hevc_levels[] = {
+	{ 10,   36864,    552960,   128,      0 },
+	{ 20,  122880,   3686400,  1500,      0 },
+	{ 21,  245760,   7372800,  3000,      0 },
+	{ 30,  552960,  16588800,  6000,      0 },
+	{ 31,  983040,  33177600, 10000,      0 },
+	{ 40, 2228224,  66846720, 12000,  30000 },
+	{ 41, 2228224, 133693440, 20000,  50000 },
+	{ 50, 8912896, 267386880, 25000, 100000 },
+};
+
+static bool wave4_vpu_enc_check_level(struct vpu_instance *inst,
+				    const struct enc_open_param *open_param)
+{
+	const struct enc_wave_param *param = &open_param->wave_param;
+	const struct wave4_hevc_level *level = NULL;
+	u32 width = ALIGN(open_param->pic_width, 8);
+	u32 height = ALIGN(open_param->pic_height, 8);
+	u32 rate_num = open_param->frame_rate_info & 0xffff;
+	u32 rate_den = (open_param->frame_rate_info >> 16) + 1;
+	u64 luma_ps = (u64)width * height;
+	u32 max_br;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(wave4_hevc_levels); i++) {
+		if (wave4_hevc_levels[i].level == param->level) {
+			level = &wave4_hevc_levels[i];
+			break;
+		}
+	}
+	if (!level)
+		goto invalid;
+
+	max_br = param->tier ? level->max_br_high : level->max_br_main;
+	if (!max_br || luma_ps > level->max_luma_ps ||
+	    (u64)width * width > 8ULL * level->max_luma_ps ||
+	    (u64)height * height > 8ULL * level->max_luma_ps ||
+	    luma_ps * rate_num > (u64)level->max_luma_sr * rate_den)
+		goto invalid;
+
+	/* Main and Main 10 use CpbBrNalFactor = 1100 (HEVC Annex A). */
+	if (open_param->rc_enable && open_param->bit_rate > (u64)max_br * 1100)
+		goto invalid;
+
+	return true;
+
+invalid:
+	dev_err(inst->dev->dev, "Encoding configuration exceeds HEVC level %u, tier %u\n",
+		param->level, param->tier);
+	return false;
+}
+
 int wave4_vpu_enc_check_open_param(struct vpu_instance *inst, struct enc_open_param *open_param)
 {
 	u32 pic_width;
@@ -3040,6 +3101,9 @@ int wave4_vpu_enc_check_open_param(struct vpu_instance *inst, struct enc_open_pa
 			pic_width, pic_height);
 		return -EINVAL;
 	}
+
+	if (!wave4_vpu_enc_check_level(inst, open_param))
+		return -EINVAL;
 
 	if (param->profile) {
 		if (inst->std == W_HEVC_ENC) {
