@@ -353,7 +353,8 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	} else {
 		if (inst->src_fmt.num_planes == 1) {
 			frame_buf.buf_y =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
+				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
+				src_buf->vb2_buf.planes[0].data_offset;
 			if (wave4_vpu_enc_is_packed_422(inst->src_fmt.pixelformat)) {
 				frame_buf.buf_cb = 0;
 				frame_buf.buf_cr = 0;
@@ -363,17 +364,22 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 			}
 		} else if (inst->src_fmt.num_planes == 2) {
 			frame_buf.buf_y =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
+				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
+				src_buf->vb2_buf.planes[0].data_offset;
 			frame_buf.buf_cb =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1);
+				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1) +
+				src_buf->vb2_buf.planes[1].data_offset;
 			frame_buf.buf_cr = frame_buf.buf_cb + chroma_size;
 		} else if (inst->src_fmt.num_planes == 3) {
 			frame_buf.buf_y =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
+				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
+				src_buf->vb2_buf.planes[0].data_offset;
 			frame_buf.buf_cb =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1);
+				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1) +
+				src_buf->vb2_buf.planes[1].data_offset;
 			frame_buf.buf_cr =
-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 2);
+				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 2) +
+				src_buf->vb2_buf.planes[2].data_offset;
 		}
 
 		frame_buf.stride = stride;
@@ -1599,6 +1605,17 @@ static int wave4_vpu_enc_buf_prepare(struct vb2_buffer *vb)
 	for (i = 0; i < fmt->num_planes; i++) {
 		if (vb2_plane_size(vb, i) < fmt->plane_fmt[i].sizeimage)
 			return -EINVAL;
+		if (V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type)) {
+			dma_addr_t addr;
+			u32 payload = vb2_get_plane_payload(vb, i);
+			u32 offset = vb->planes[i].data_offset;
+
+			if (offset > payload || payload - offset < fmt->plane_fmt[i].sizeimage)
+				return -EINVAL;
+			addr = vb2_dma_contig_plane_dma_addr(vb, i) + offset;
+			if (!IS_ALIGNED(addr, 16))
+				return -EINVAL;
+		}
 	}
 
 	return 0;
