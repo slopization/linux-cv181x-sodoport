@@ -904,13 +904,17 @@ int wave4_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_i
 		return ret;
 
 	ret = wave4_vpu_enc_get_result(inst, info);
-	if (ret) {
-		info->pts = 0;
+	info->pts = 0;
+	if (ret)
 		goto unlock;
-	}
 
-	if (info->recon_frame_index >= 0)
+	if (info->recon_frame_index >= 0) {
+		if ((u32)info->enc_src_idx >= ARRAY_SIZE(p_enc_info->pts_map)) {
+			ret = -EIO;
+			goto unlock;
+		}
 		info->pts = p_enc_info->pts_map[info->enc_src_idx];
+	}
 
 unlock:
 	mutex_unlock(&vpu_dev->hw_lock);
