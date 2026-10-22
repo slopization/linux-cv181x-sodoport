@@ -35,10 +35,17 @@ static int wave4_initialize_vpu(struct device *dev, u8 *code, size_t size)
 	}
 
 	ret = wave4_vpu_reset(dev, SW_RESET_ON_BOOT);
-	if (ret)
+	if (ret == -EBUSY) {
+		dev_warn(dev, "Cold reset busy, attempting firmware reinitialization\n");
+		ret = wave4_vpu_re_init(dev, code, size);
+		if (!ret)
+			goto err_out;
+		dev_warn(dev, "Firmware reinitialization failed: %d, retrying cold init\n", ret);
+	} else if (ret) {
 		goto err_out;
+	}
 
-	ret = wave4_vpu_init(dev, (void *)code, size);
+	ret = wave4_vpu_init(dev, code, size);
 
 err_out:
 	mutex_unlock(&vpu_dev->hw_lock);

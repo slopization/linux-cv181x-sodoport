@@ -248,7 +248,6 @@ static int wave4_vpu_load_firmware(struct device *dev, const char *fw_name,
 	int ret;
 	unsigned int product_id;
 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
-	bool skip_version_query = false;
 
 	ret = request_firmware(&fw, fw_name, dev);
 	if (ret) {
@@ -257,38 +256,12 @@ static int wave4_vpu_load_firmware(struct device *dev, const char *fw_name,
 	}
 
 	ret = wave4_vpu_init_with_bitcode(dev, (u8 *)fw->data, fw->size);
-	if (ret == -EBUSY) {
-		dev_warn(dev, "VPU firmware is already running, reusing resident firmware\n");
-		ret = wave4_vpu_re_init(dev, (u8 *)fw->data, fw->size);
-		if (ret) {
-			dev_warn(dev, "w4 resident re-init/setup failed: %d\n", ret);
-			/*
-			 * Follow with a full INIT_VPU attempt even after timeout
-			 * based failures, since some boots recover only on the
-			 * cold-init path.
-			 */
-			ret = wave4_vpu_init(dev, (u8 *)fw->data, fw->size);
-			if (ret) {
-				dev_warn(dev,
-					 "w4 firmware recovery failed: %d, falling back to resident fw\n",
-					 ret);
-				vpu_dev->fw_running = true;
-				skip_version_query = true;
-				ret = 0;
-			}
-		}
-	}
 	if (ret) {
 		dev_err(dev, "vpu_init_with_bitcode, fail: %d\n", ret);
 		release_firmware(fw);
 		return ret;
 	}
 	release_firmware(fw);
-
-	if (skip_version_query) {
-		*revision = 0;
-		return 0;
-	}
 
 	ret = wave4_vpu_get_version_info(dev, revision, &product_id);
 	if (ret) {
