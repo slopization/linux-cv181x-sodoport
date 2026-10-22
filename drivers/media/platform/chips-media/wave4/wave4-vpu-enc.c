@@ -1230,6 +1230,12 @@ static int wave4_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
 
 	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
 
+	/* Only AUD and force-keyframe are applied per picture, not at open. */
+	if (inst->state != VPU_INST_STATE_NONE &&
+	    ctrl->id != V4L2_CID_MPEG_VIDEO_AU_DELIMITER &&
+	    ctrl->id != V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME)
+		return -EBUSY;
+
 	switch (ctrl->id) {
 	case V4L2_CID_MPEG_VIDEO_AU_DELIMITER:
 		inst->encode_aud = ctrl->val;
