@@ -1061,6 +1061,10 @@ static int wave4_vpu_enc_s_parm(struct file *file, void *fh, struct v4l2_streamp
 	if (a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT && a->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 		return -EINVAL;
 
+	/* The firmware frame rate is fixed when the session opens. */
+	if (inst->state != VPU_INST_STATE_NONE)
+		return -EBUSY;
+
 	a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
 	if (a->parm.output.timeperframe.denominator && a->parm.output.timeperframe.numerator) {
 		u32 rate = DIV_ROUND_CLOSEST_ULL((u64)a->parm.output.timeperframe.denominator,
