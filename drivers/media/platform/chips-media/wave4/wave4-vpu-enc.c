@@ -1815,14 +1815,7 @@ static int initialize_sequence(struct vpu_instance *inst)
 	p_enc_info->stream_rd_ptr = p_enc_info->stream_buf_start_addr;
 	p_enc_info->stream_wr_ptr = p_enc_info->stream_buf_start_addr;
 
-	ret = wave4_vpu_enc_issue_seq_init(inst);
-	if (ret) {
-		dev_err(inst->dev->dev, "%s: wave4_vpu_enc_issue_seq_init, fail: %d\n",
-			__func__, ret);
-		return ret;
-	}
-
-	ret = wave4_vpu_enc_complete_seq_init(inst, &initial_info);
+	ret = wave4_vpu_enc_initialize_sequence(inst, &initial_info);
 	if (ret)
 		return ret;
 

@@ -901,8 +901,7 @@ int wave4_vpu_dec_set_disp_flag(struct vpu_instance *inst, int index);
 
 int wave4_vpu_enc_open(struct vpu_instance *inst, struct enc_open_param *open_param);
 int wave4_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res);
-int wave4_vpu_enc_issue_seq_init(struct vpu_instance *inst);
-int wave4_vpu_enc_complete_seq_init(struct vpu_instance *inst, struct enc_initial_info *info);
+int wave4_vpu_enc_initialize_sequence(struct vpu_instance *inst, struct enc_initial_info *info);
 int wave4_vpu_enc_register_frame_buffer(struct vpu_instance *inst, unsigned int num,
 					unsigned int stride, int height,
 					enum tiled_map_type map_type);

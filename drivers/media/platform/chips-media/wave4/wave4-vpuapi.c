@@ -967,27 +967,11 @@ int wave4_vpu_enc_give_command(struct vpu_instance *inst, enum codec_command cmd
 	return 0;
 }
 
-int wave4_vpu_enc_issue_seq_init(struct vpu_instance *inst)
-{
-	int ret;
-	struct vpu_device *vpu_dev = inst->dev;
-
-	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
-	if (ret)
-		return ret;
-
-	ret = wave4_vpu_enc_init_seq(inst);
-
-	mutex_unlock(&vpu_dev->hw_lock);
-
-	return ret;
-}
-
-int wave4_vpu_enc_complete_seq_init(struct vpu_instance *inst, struct enc_initial_info *info)
+int wave4_vpu_enc_initialize_sequence(struct vpu_instance *inst, struct enc_initial_info *info)
 {
 	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
-	int ret;
 	struct vpu_device *vpu_dev = inst->dev;
+	int ret;
 
 	if (!info)
 		return -EINVAL;
@@ -996,17 +980,21 @@ int wave4_vpu_enc_complete_seq_init(struct vpu_instance *inst, struct enc_initia
 	if (ret)
 		return ret;
 
+	/* SET_PARAM results are shared latches, not a per-instance query. */
+	p_enc_info->initial_info_obtained = false;
+	ret = wave4_vpu_enc_init_seq(inst);
+	if (ret)
+		goto unlock;
+
 	ret = wave4_vpu_enc_get_seq_info(inst, info);
-	if (ret) {
-		p_enc_info->initial_info_obtained = false;
-		mutex_unlock(&vpu_dev->hw_lock);
-		return ret;
-	}
+	if (ret)
+		goto unlock;
 
 	p_enc_info->initial_info_obtained = true;
 	p_enc_info->initial_info = *info;
 
+unlock:
 	mutex_unlock(&vpu_dev->hw_lock);
 
-	return 0;
+	return ret;
 }
