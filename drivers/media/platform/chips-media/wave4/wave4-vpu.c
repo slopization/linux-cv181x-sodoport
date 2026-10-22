@@ -311,6 +311,8 @@ static int wave4_vpu_load_firmware(struct device *dev, const char *fw_name,
 static __maybe_unused int wave4_pm_suspend(struct device *dev)
 {
 	struct vpu_device *vpu = dev_get_drvdata(dev);
+	bool restart_timer = false;
+	int ret;
 
 	if (w4_forbid_runtime_pm)
 		return 0;
@@ -319,9 +321,16 @@ static __maybe_unused int wave4_pm_suspend(struct device *dev)
 		return 0;
 
 	if (vpu->irq < 0)
-		hrtimer_cancel(&vpu->hrtimer);
+		restart_timer = hrtimer_cancel(&vpu->hrtimer);
 
-	wave4_vpu_sleep_wake(dev, true, NULL, 0);
+	ret = wave4_vpu_sleep_wake(dev, true, NULL, 0);
+	if (ret) {
+		if (restart_timer)
+			hrtimer_start(&vpu->hrtimer,
+				      ns_to_ktime(W4_POLL_INTERVAL_MS * NSEC_PER_MSEC),
+				      HRTIMER_MODE_REL_PINNED);
+		return ret;
+	}
 	clk_bulk_disable_unprepare(vpu->num_clks, vpu->clks);
 
 	return 0;
