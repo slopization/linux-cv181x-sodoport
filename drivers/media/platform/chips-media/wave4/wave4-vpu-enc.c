@@ -1911,6 +1911,7 @@ static int wave4_vpu_open_enc(struct file *filp)
 	v4l2_ctrl_hdl = &inst->v4l2_ctrl_hdl;
 
 	inst->dev = dev;
+	inst->id = -1;
 	inst->type = VPU_INST_TYPE_ENC;
 
 	inst->codec_info = kzalloc_obj(*inst->codec_info);

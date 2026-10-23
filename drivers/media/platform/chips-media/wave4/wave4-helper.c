@@ -50,7 +50,8 @@ void wave4_cleanup_instance(struct vpu_instance *inst, struct file *filp)
 		v4l2_fh_exit(&inst->v4l2_fh);
 	}
 	kfifo_free(&inst->irq_status);
-	ida_free(&inst->dev->inst_ida, inst->id);
+	if (inst->id >= 0)
+		ida_free(&inst->dev->inst_ida, inst->id);
 	kfree(inst->codec_info);
 	kfree(inst);
 }
