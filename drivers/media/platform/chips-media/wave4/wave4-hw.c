@@ -129,9 +129,24 @@ static void _wave4_print_reg_err(struct vpu_device *vpu_dev, u32 reg_fail_reason
 	}
 }
 
+static int wave4_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 *val)
+{
+	u32 ctrl = addr & 0xffff;
+	int ret;
+
+	wave4_vdi_write_register(vpu_dev, W4_VPU_FIO_CTRL_ADDR, ctrl);
+	ret = read_poll_timeout(wave4_vdi_read_register, ctrl, ctrl & FIO_CTRL_READY,
+				0, FIO_TIMEOUT, false, vpu_dev, W4_VPU_FIO_CTRL_ADDR);
+	if (ret)
+		return ret;
+
+	*val = wave4_vdi_read_register(vpu_dev, W4_VPU_FIO_DATA);
+	return 0;
+}
+
 static int wave4_wait_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 val)
 {
-	u32 ctrl;
+	u32 data;
 	ktime_t deadline;
 	int ret;
 
@@ -141,15 +156,11 @@ static int wave4_wait_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 val)
 	 */
 	deadline = ktime_add_us(ktime_get(), FIO_TIMEOUT);
 	do {
-		ctrl = addr & 0xffff;
-		wave4_vdi_write_register(vpu_dev, W4_VPU_FIO_CTRL_ADDR, ctrl);
-		ret = read_poll_timeout(wave4_vdi_read_register, ctrl, ctrl & FIO_CTRL_READY,
-					0, FIO_TIMEOUT, false, vpu_dev,
-					W4_VPU_FIO_CTRL_ADDR);
+		ret = wave4_fio_readl(vpu_dev, addr, &data);
 		if (ret)
 			return ret;
 
-		if (wave4_vdi_read_register(vpu_dev, W4_VPU_FIO_DATA) == val)
+		if (data == val)
 			return 0;
 		cpu_relax();
 	} while (ktime_before(ktime_get(), deadline));
@@ -185,11 +196,6 @@ static int wave4_wait_vpu_busy(struct vpu_device *vpu_dev, unsigned int addr)
 
 	return read_poll_timeout(wave4_vdi_read_register, data, data == 0,
 				 0, VPU_BUSY_CHECK_TIMEOUT, false, vpu_dev, addr);
-}
-
-static int wave4_wait_vcpu_bus_busy(struct vpu_device *vpu_dev, unsigned int addr)
-{
-	return wave4_wait_fio_readl(vpu_dev, addr, 0);
 }
 
 bool wave4_vpu_is_init(struct vpu_device *vpu_dev)
@@ -1620,9 +1626,10 @@ int wave4_vpu_sleep_wake(struct device *dev, bool i_sleep_wake, const uint16_t *
 int wave4_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 {
 	u32 val = 0;
-	int ret = 0;
+	u32 gdi_ctrl;
+	bool use_bus_ctrl;
+	int ret;
 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
-	struct vpu_attr *p_attr = &vpu_dev->attr;
 	/* VPU doesn't send response. force to set BUSY flag to 0. */
 	vpu_write_reg(vpu_dev, W4_VPU_BUSY_STATUS, 0);
 
@@ -1632,69 +1639,22 @@ int wave4_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 			return ret;
 	}
 
-	val = vpu_read_reg(vpu_dev, W4_VPU_RET_VPU_CONFIG0);
-	if ((val >> 16) & 0x1)
-		p_attr->support_backbone = true;
-	if ((val >> 22) & 0x1)
-		p_attr->support_vcore_backbone = true;
-	if ((val >> 28) & 0x1)
-		p_attr->support_vcpu_backbone = true;
-
-	/* waiting for completion of bus transaction */
-	if (p_attr->support_backbone) {
-		dev_dbg(dev, "%s: backbone supported\n", __func__);
-
-		if (p_attr->support_vcore_backbone) {
-			if (p_attr->support_vcpu_backbone) {
-				/* step1 : disable request */
-				ret = wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCPU, 0xFF);
-				if (ret)
-					return ret;
-
-				/* step2 : waiting for completion of bus transaction */
-				ret = wave4_wait_vcpu_bus_busy(vpu_dev,
-							       W4_BACKBONE_BUS_STATUS_VCPU);
-				if (ret) {
-					(void)wave4_fio_writel(vpu_dev,
-							       W4_BACKBONE_BUS_CTRL_VCPU, 0x00);
-					return ret;
-				}
-			}
-			/* step1 : disable request */
-			ret = wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCORE0, 0x7);
-			if (ret)
-				return ret;
-
-			/* step2 : waiting for completion of bus transaction */
-			if (wave4_wait_bus_busy(vpu_dev, W4_BACKBONE_BUS_STATUS_VCORE0)) {
-				(void)wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCORE0, 0x00);
-				return -EBUSY;
-			}
-		} else {
-			/* step1 : disable request */
-			ret = wave4_fio_writel(vpu_dev, W4_COMBINED_BACKBONE_BUS_CTRL, 0x7);
-			if (ret)
-				return ret;
-
-			/* step2 : waiting for completion of bus transaction */
-			if (wave4_wait_bus_busy(vpu_dev, W4_COMBINED_BACKBONE_BUS_STATUS)) {
-				(void)wave4_fio_writel(vpu_dev, W4_COMBINED_BACKBONE_BUS_CTRL, 0x00);
-				return -EBUSY;
-			}
-		}
-	} else {
-		dev_dbg(dev, "%s: backbone NOT supported\n", __func__);
-		/* step1 : disable request */
-		ret = wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x100);
+	/* Wave420L uses GDI bus control, not Wave5 CONFIG0 backbone selectors. */
+	ret = wave4_fio_readl(vpu_dev, W4_GDI_BUS_CTRL, &gdi_ctrl);
+	if (ret)
+		return ret;
+	use_bus_ctrl = (gdi_ctrl >> 24) == 1;
+	if (use_bus_ctrl) {
+		ret = wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x11);
 		if (ret)
 			return ret;
+	}
 
-		/* step2 : waiting for completion of bus transaction */
-		ret = wave4_wait_bus_busy(vpu_dev, W4_GDI_BUS_STATUS);
-		if (ret) {
+	ret = wave4_wait_bus_busy(vpu_dev, W4_GDI_BUS_STATUS);
+	if (ret) {
+		if (use_bus_ctrl)
 			(void)wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
-			return ret;
-		}
+		return ret;
 	}
 
 	switch (reset_mode) {
@@ -1717,23 +1677,12 @@ int wave4_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 		}
 		vpu_write_reg(vpu_dev, W4_VPU_RESET_REQ, 0);
 	}
-	/* step3 : must clear GDI_BUS_CTRL after done SW_RESET */
-	if (p_attr->support_backbone) {
-		if (p_attr->support_vcore_backbone) {
-			if (p_attr->support_vcpu_backbone) {
-				ret = wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCPU, 0x00);
-				if (ret)
-					return ret;
-			}
-			ret = wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCORE0, 0x00);
-		} else {
-			ret = wave4_fio_writel(vpu_dev, W4_COMBINED_BACKBONE_BUS_CTRL, 0x00);
-		}
-	} else {
+	/* Release only the controller whose request was disabled above. */
+	if (use_bus_ctrl) {
 		ret = wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+		if (ret)
+			return ret;
 	}
-	if (ret)
-		return ret;
 	if (reset_mode == SW_RESET_SAFETY || reset_mode == SW_RESET_FORCE)
 		ret = wave4_vpu_sleep_wake(dev, false, NULL, 0);
 
