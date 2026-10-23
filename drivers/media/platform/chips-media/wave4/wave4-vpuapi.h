@@ -575,7 +575,7 @@ struct enc_open_param {
 	unsigned int bitstream_buffer_size;
 	u32 pic_width; /* width of a picture to be encoded in unit of sample */
 	u32 pic_height; /* height of a picture to be encoded in unit of sample */
-	u32 frame_rate_info;/* desired fps */
+	u32 frame_rate_info; /* [15:0] numerator, [31:16] denominator minus one */
 	u32 vbv_buffer_size;
 	u32 initial_delay; /* initial CPB removal delay in milliseconds */
 	u32 bit_rate; /* target bitrate in bps */
@@ -618,11 +618,17 @@ struct enc_param {
 	u32 force_pic_type: 3;
 	u32 force_pic_type_enable: 1;
 	struct enc_code_opt code_option;
-	u64 pts; /* presentation timestamp (PTS) of the input source */
 	bool src_end_flag;
 };
 
+enum wave4_enc_frame_state {
+	W4_ENC_FRAME_NOT_SUBMITTED = 0,
+	W4_ENC_FRAME_COMPLETE, /* command reached idle; result may still fail */
+	W4_ENC_FRAME_UNKNOWN, /* issued, but idle not established; lifetime unresolved */
+};
+
 struct enc_output_info {
+	enum wave4_enc_frame_state state;
 	u32 bitstream_buffer;
 	u32 bitstream_size; /* byte size of encoded bitstream */
 	u32 pic_type: 2; /* <<vpuapi_h_pic_type>> */
@@ -635,7 +641,6 @@ struct enc_output_info {
 	u32 error_reason; /* error reason of the currently encoded picture */
 	u32 warn_info; /* warning information on the currently encoded picture */
 	unsigned int frame_cycle; /* param for reporting the cycle number of encoding one frame*/
-	u64 pts;
 	u32 enc_host_cmd_tick; /* tick of ENC_PIC command for the picture */
 	u32 enc_encode_end_tick; /* end tick of encoding slices of the picture */
 };
@@ -702,14 +707,6 @@ struct dec_info {
 	u32 stream_endflag: 1;
 };
 
-struct wave4_enc_src_meta {
-	s32 idx;
-	s32 dst_idx;
-	u64 timestamp;
-	u32 flags;
-	struct v4l2_timecode timecode;
-};
-
 struct enc_info {
 	struct enc_open_param open_param;
 	struct enc_initial_info initial_info;
@@ -734,12 +731,7 @@ struct enc_info {
 	struct vpu_buf vb_sub_sam_buf; /* sub-sampled buffer for ME */
 	struct vpu_buf vb_task;
 	u64 cur_pts; /* current timestamp in 90_k_hz */
-	u64 pts_map[32]; /* PTS mapped with source frame index */
-	struct wave4_enc_src_meta src_meta_fifo[W4_COMMAND_QUEUE_DEPTH];
-	u32 src_meta_head;
-	u32 src_meta_count;
-	int async_pm_ref_held; /* runtime-PM ref held by async device_run until finish callback */
-	bool stop_pending; /* streamoff is in progress; ignore late ENC_PIC completions */
+	bool stop_pending; /* cancel session submissions; rechecked under hw_lock */
 	u32 instance_queue_count;
 	u32 report_queue_count;
 	bool first_cycle_check;
@@ -901,14 +893,12 @@ int wave4_vpu_dec_set_disp_flag(struct vpu_instance *inst, int index);
 
 int wave4_vpu_enc_open(struct vpu_instance *inst, struct enc_open_param *open_param);
 int wave4_vpu_enc_close(struct vpu_instance *inst, u32 *fail_res);
-int wave4_vpu_enc_issue_seq_init(struct vpu_instance *inst);
-int wave4_vpu_enc_complete_seq_init(struct vpu_instance *inst, struct enc_initial_info *info);
+int wave4_vpu_enc_initialize_sequence(struct vpu_instance *inst, struct enc_initial_info *info);
 int wave4_vpu_enc_register_frame_buffer(struct vpu_instance *inst, unsigned int num,
 					unsigned int stride, int height,
 					enum tiled_map_type map_type);
-int wave4_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *param,
-				  u32 *fail_res);
-int wave4_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *info);
+int wave4_vpu_enc_encode_frame(struct vpu_instance *inst, struct enc_param *param,
+			       struct enc_output_info *info, u32 *fail_res);
 int wave4_vpu_enc_give_command(struct vpu_instance *inst, enum codec_command cmd, void *parameter);
 
 #endif

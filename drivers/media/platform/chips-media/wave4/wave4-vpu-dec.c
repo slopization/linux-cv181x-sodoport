@@ -1840,6 +1840,7 @@ static int wave4_vpu_open_dec(struct file *filp)
 		return -ENOMEM;
 
 	inst->dev = dev;
+	inst->id = -1;
 	inst->type = VPU_INST_TYPE_DEC;
 	inst->ops = &wave4_vpu_dec_inst_ops;
 

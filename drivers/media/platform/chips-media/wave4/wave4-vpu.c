@@ -130,7 +130,7 @@ static void wave4_vpu_handle_irq(void *dev_id)
 		if (irq_reason & READ_ONCE(inst->command_irq_mask))
 			complete(&inst->command_done);
 
-		if (irq_reason & W4_VPU_INT_PIC_RUN) {
+		if (inst->type != VPU_INST_TYPE_ENC && (irq_reason & W4_VPU_INT_PIC_RUN)) {
 			val = BIT(INT_W4_DEC_PIC);
 			kfifo_in(&inst->irq_status, &val, sizeof(int));
 			complete(&inst->irq_done);
@@ -167,13 +167,8 @@ static irqreturn_t wave4_vpu_irq_thread(int irq, void *dev_id)
 			if (!ret)
 				break;
 
-			/*
-			 * Encoder completion callbacks are valid only while one
-			 * async ENC_PIC job is inflight. Ignore stale/duplicate
-			 * PIC notifications that arrive after job completion.
-			 */
-			if (inst->type == VPU_INST_TYPE_ENC &&
-			    !READ_ONCE(inst->codec_info->enc_info.async_pm_ref_held))
+			/* Encoder pictures are retired by their synchronous runner. */
+			if (inst->type == VPU_INST_TYPE_ENC)
 				continue;
 
 			inst->ops->finish_process(inst);
@@ -223,13 +218,8 @@ static int irq_thread(void *data)
 				if (!ret)
 					break;
 
-				/*
-				 * Encoder completion callbacks are valid only while one
-				 * async ENC_PIC job is inflight. Ignore stale/duplicate
-				 * PIC notifications that arrive after job completion.
-				 */
-				if (inst->type == VPU_INST_TYPE_ENC &&
-				    !READ_ONCE(inst->codec_info->enc_info.async_pm_ref_held))
+				/* Encoder pictures are retired by their synchronous runner. */
+				if (inst->type == VPU_INST_TYPE_ENC)
 					continue;
 
 				inst->ops->finish_process(inst);
@@ -248,7 +238,6 @@ static int wave4_vpu_load_firmware(struct device *dev, const char *fw_name,
 	int ret;
 	unsigned int product_id;
 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
-	bool skip_version_query = false;
 
 	ret = request_firmware(&fw, fw_name, dev);
 	if (ret) {
@@ -257,38 +246,12 @@ static int wave4_vpu_load_firmware(struct device *dev, const char *fw_name,
 	}
 
 	ret = wave4_vpu_init_with_bitcode(dev, (u8 *)fw->data, fw->size);
-	if (ret == -EBUSY) {
-		dev_warn(dev, "VPU firmware is already running, reusing resident firmware\n");
-		ret = wave4_vpu_re_init(dev, (u8 *)fw->data, fw->size);
-		if (ret) {
-			dev_warn(dev, "w4 resident re-init/setup failed: %d\n", ret);
-			/*
-			 * Follow with a full INIT_VPU attempt even after timeout
-			 * based failures, since some boots recover only on the
-			 * cold-init path.
-			 */
-			ret = wave4_vpu_init(dev, (u8 *)fw->data, fw->size);
-			if (ret) {
-				dev_warn(dev,
-					 "w4 firmware recovery failed: %d, falling back to resident fw\n",
-					 ret);
-				vpu_dev->fw_running = true;
-				skip_version_query = true;
-				ret = 0;
-			}
-		}
-	}
 	if (ret) {
 		dev_err(dev, "vpu_init_with_bitcode, fail: %d\n", ret);
 		release_firmware(fw);
 		return ret;
 	}
 	release_firmware(fw);
-
-	if (skip_version_query) {
-		*revision = 0;
-		return 0;
-	}
 
 	ret = wave4_vpu_get_version_info(dev, revision, &product_id);
 	if (ret) {
@@ -311,6 +274,8 @@ static int wave4_vpu_load_firmware(struct device *dev, const char *fw_name,
 static __maybe_unused int wave4_pm_suspend(struct device *dev)
 {
 	struct vpu_device *vpu = dev_get_drvdata(dev);
+	bool restart_timer = false;
+	int ret;
 
 	if (w4_forbid_runtime_pm)
 		return 0;
@@ -319,9 +284,16 @@ static __maybe_unused int wave4_pm_suspend(struct device *dev)
 		return 0;
 
 	if (vpu->irq < 0)
-		hrtimer_cancel(&vpu->hrtimer);
+		restart_timer = hrtimer_cancel(&vpu->hrtimer);
 
-	wave4_vpu_sleep_wake(dev, true, NULL, 0);
+	ret = wave4_vpu_sleep_wake(dev, true, NULL, 0);
+	if (ret) {
+		if (restart_timer)
+			hrtimer_start(&vpu->hrtimer,
+				      ns_to_ktime(W4_POLL_INTERVAL_MS * NSEC_PER_MSEC),
+				      HRTIMER_MODE_REL_PINNED);
+		return ret;
+	}
 	clk_bulk_disable_unprepare(vpu->num_clks, vpu->clks);
 
 	return 0;

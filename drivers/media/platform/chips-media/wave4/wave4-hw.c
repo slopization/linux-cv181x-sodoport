@@ -129,9 +129,24 @@ static void _wave4_print_reg_err(struct vpu_device *vpu_dev, u32 reg_fail_reason
 	}
 }
 
+static int wave4_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 *val)
+{
+	u32 ctrl = addr & 0xffff;
+	int ret;
+
+	wave4_vdi_write_register(vpu_dev, W4_VPU_FIO_CTRL_ADDR, ctrl);
+	ret = read_poll_timeout(wave4_vdi_read_register, ctrl, ctrl & FIO_CTRL_READY,
+				0, FIO_TIMEOUT, false, vpu_dev, W4_VPU_FIO_CTRL_ADDR);
+	if (ret)
+		return ret;
+
+	*val = wave4_vdi_read_register(vpu_dev, W4_VPU_FIO_DATA);
+	return 0;
+}
+
 static int wave4_wait_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 val)
 {
-	u32 ctrl;
+	u32 data;
 	ktime_t deadline;
 	int ret;
 
@@ -141,15 +156,11 @@ static int wave4_wait_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 val)
 	 */
 	deadline = ktime_add_us(ktime_get(), FIO_TIMEOUT);
 	do {
-		ctrl = addr & 0xffff;
-		wave4_vdi_write_register(vpu_dev, W4_VPU_FIO_CTRL_ADDR, ctrl);
-		ret = read_poll_timeout(wave4_vdi_read_register, ctrl, ctrl & FIO_CTRL_READY,
-					0, FIO_TIMEOUT, false, vpu_dev,
-					W4_VPU_FIO_CTRL_ADDR);
+		ret = wave4_fio_readl(vpu_dev, addr, &data);
 		if (ret)
 			return ret;
 
-		if (wave4_vdi_read_register(vpu_dev, W4_VPU_FIO_DATA) == val)
+		if (data == val)
 			return 0;
 		cpu_relax();
 	} while (ktime_before(ktime_get(), deadline));
@@ -157,7 +168,7 @@ static int wave4_wait_fio_readl(struct vpu_device *vpu_dev, u32 addr, u32 val)
 	return -ETIMEDOUT;
 }
 
-static void wave4_fio_writel(struct vpu_device *vpu_dev, unsigned int addr, unsigned int data)
+static int wave4_fio_writel(struct vpu_device *vpu_dev, unsigned int addr, unsigned int data)
 {
 	int ret;
 	unsigned int ctrl;
@@ -171,6 +182,7 @@ static void wave4_fio_writel(struct vpu_device *vpu_dev, unsigned int addr, unsi
 	if (ret)
 		dev_dbg_ratelimited(vpu_dev->dev, "FIO write timeout: addr=0x%x data=%x\n",
 				    ctrl, data);
+	return ret;
 }
 
 static int wave4_wait_bus_busy(struct vpu_device *vpu_dev, unsigned int addr)
@@ -184,11 +196,6 @@ static int wave4_wait_vpu_busy(struct vpu_device *vpu_dev, unsigned int addr)
 
 	return read_poll_timeout(wave4_vdi_read_register, data, data == 0,
 				 0, VPU_BUSY_CHECK_TIMEOUT, false, vpu_dev, addr);
-}
-
-static int wave4_wait_vcpu_bus_busy(struct vpu_device *vpu_dev, unsigned int addr)
-{
-	return wave4_wait_fio_readl(vpu_dev, addr, 0);
 }
 
 bool wave4_vpu_is_init(struct vpu_device *vpu_dev)
@@ -1442,10 +1449,12 @@ int wave4_vpu_re_init(struct device *dev, u8 *fw, size_t size)
 		 * Match Wave4 BSP reset ordering: gate GDI transactions before
 		 * asserting reset, then release GDI bus control afterwards.
 		 */
-		wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x100);
+		ret = wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x100);
+		if (ret)
+			return ret;
 		ret = wave4_wait_bus_busy(vpu_dev, W4_GDI_BUS_STATUS);
 		if (ret) {
-			wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+			(void)wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
 			dev_err(vpu_dev->dev, "VPU reinit(W4 gdi bus idle) timeout\n");
 			return ret;
 		}
@@ -1458,12 +1467,14 @@ int wave4_vpu_re_init(struct device *dev, u8 *fw, size_t size)
 		ret = wave4_wait_vpu_busy(vpu_dev, W4_VPU_RESET_STATUS);
 		if (ret) {
 			vpu_write_reg(vpu_dev, W4_VPU_RESET_REQ, 0);
-			wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+			(void)wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
 			dev_err(vpu_dev->dev, "VPU reinit(W4 reset-all) timeout\n");
 			return ret;
 		}
 		vpu_write_reg(vpu_dev, W4_VPU_RESET_REQ, 0);
-		wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+		ret = wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+		if (ret)
+			return ret;
 
 		/* clear command window registers */
 		for (reg_val = W4_CMD_REG_BASE; reg_val < W4_CMD_REG_END; reg_val += 4)
@@ -1615,9 +1626,10 @@ int wave4_vpu_sleep_wake(struct device *dev, bool i_sleep_wake, const uint16_t *
 int wave4_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 {
 	u32 val = 0;
-	int ret = 0;
+	u32 gdi_ctrl;
+	bool use_bus_ctrl;
+	int ret;
 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
-	struct vpu_attr *p_attr = &vpu_dev->attr;
 	/* VPU doesn't send response. force to set BUSY flag to 0. */
 	vpu_write_reg(vpu_dev, W4_VPU_BUSY_STATUS, 0);
 
@@ -1627,60 +1639,22 @@ int wave4_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 			return ret;
 	}
 
-	val = vpu_read_reg(vpu_dev, W4_VPU_RET_VPU_CONFIG0);
-	if ((val >> 16) & 0x1)
-		p_attr->support_backbone = true;
-	if ((val >> 22) & 0x1)
-		p_attr->support_vcore_backbone = true;
-	if ((val >> 28) & 0x1)
-		p_attr->support_vcpu_backbone = true;
-
-	/* waiting for completion of bus transaction */
-	if (p_attr->support_backbone) {
-		dev_dbg(dev, "%s: backbone supported\n", __func__);
-
-		if (p_attr->support_vcore_backbone) {
-			if (p_attr->support_vcpu_backbone) {
-				/* step1 : disable request */
-				wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCPU, 0xFF);
-
-				/* step2 : waiting for completion of bus transaction */
-				ret = wave4_wait_vcpu_bus_busy(vpu_dev,
-							       W4_BACKBONE_BUS_STATUS_VCPU);
-				if (ret) {
-					wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCPU, 0x00);
-					return ret;
-				}
-			}
-			/* step1 : disable request */
-			wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCORE0, 0x7);
-
-			/* step2 : waiting for completion of bus transaction */
-			if (wave4_wait_bus_busy(vpu_dev, W4_BACKBONE_BUS_STATUS_VCORE0)) {
-				wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCORE0, 0x00);
-				return -EBUSY;
-			}
-		} else {
-			/* step1 : disable request */
-			wave4_fio_writel(vpu_dev, W4_COMBINED_BACKBONE_BUS_CTRL, 0x7);
-
-			/* step2 : waiting for completion of bus transaction */
-			if (wave4_wait_bus_busy(vpu_dev, W4_COMBINED_BACKBONE_BUS_STATUS)) {
-				wave4_fio_writel(vpu_dev, W4_COMBINED_BACKBONE_BUS_CTRL, 0x00);
-				return -EBUSY;
-			}
-		}
-	} else {
-		dev_dbg(dev, "%s: backbone NOT supported\n", __func__);
-		/* step1 : disable request */
-		wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x100);
-
-		/* step2 : waiting for completion of bus transaction */
-		ret = wave4_wait_bus_busy(vpu_dev, W4_GDI_BUS_STATUS);
-		if (ret) {
-			wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+	/* Wave420L uses GDI bus control, not Wave5 CONFIG0 backbone selectors. */
+	ret = wave4_fio_readl(vpu_dev, W4_GDI_BUS_CTRL, &gdi_ctrl);
+	if (ret)
+		return ret;
+	use_bus_ctrl = (gdi_ctrl >> 24) == 1;
+	if (use_bus_ctrl) {
+		ret = wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x11);
+		if (ret)
 			return ret;
-		}
+	}
+
+	ret = wave4_wait_bus_busy(vpu_dev, W4_GDI_BUS_STATUS);
+	if (ret) {
+		if (use_bus_ctrl)
+			(void)wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+		return ret;
 	}
 
 	switch (reset_mode) {
@@ -1703,17 +1677,11 @@ int wave4_vpu_reset(struct device *dev, enum sw_reset_mode reset_mode)
 		}
 		vpu_write_reg(vpu_dev, W4_VPU_RESET_REQ, 0);
 	}
-	/* step3 : must clear GDI_BUS_CTRL after done SW_RESET */
-	if (p_attr->support_backbone) {
-		if (p_attr->support_vcore_backbone) {
-			if (p_attr->support_vcpu_backbone)
-				wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCPU, 0x00);
-			wave4_fio_writel(vpu_dev, W4_BACKBONE_BUS_CTRL_VCORE0, 0x00);
-		} else {
-			wave4_fio_writel(vpu_dev, W4_COMBINED_BACKBONE_BUS_CTRL, 0x00);
-		}
-	} else {
-		wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+	/* Release only the controller whose request was disabled above. */
+	if (use_bus_ctrl) {
+		ret = wave4_fio_writel(vpu_dev, W4_GDI_BUS_CTRL, 0x00);
+		if (ret)
+			return ret;
 	}
 	if (reset_mode == SW_RESET_SAFETY || reset_mode == SW_RESET_FORCE)
 		ret = wave4_vpu_sleep_wake(dev, false, NULL, 0);
@@ -2447,10 +2415,10 @@ int wave4_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 	    !(p_enc_info->rotation_angle == 180 &&
 	    p_enc_info->mirror_direction == MIRDIR_HOR_VER)) {
 		luma_stride = calculate_luma_stride(buf_width, bit_depth);
-		chroma_stride = calculate_chroma_stride(buf_width / 2, bit_depth);
+		chroma_stride = calculate_chroma_stride(buf_width, bit_depth);
 	} else {
 		luma_stride = calculate_luma_stride(p_open_param->pic_width, bit_depth);
-		chroma_stride = calculate_chroma_stride(p_open_param->pic_width / 2, bit_depth);
+		chroma_stride = calculate_chroma_stride(p_open_param->pic_width, bit_depth);
 	}
 
 	vpu_write_reg(inst->dev, W4_FBC_STRIDE, luma_stride << 16 | chroma_stride);
@@ -2523,7 +2491,7 @@ static u32 wave4_vpu_enc_validate_sec_axi(struct vpu_instance *inst, u32 *sec_ax
 	struct enc_open_param *p_open_param = &p_enc_info->open_param;
 	u32 imd_size = 0, rdo_size = 0, lf_size = 0;
 	u32 ret = 0, used = 0;
-	u32 sram_size = inst->dev->sram_size;
+	u32 sram_size = inst->dev->sram_buf.size;
 	u32 width = p_open_param->pic_width ?: inst->src_fmt.width;
 	u32 lf_luma = 5, lf_chroma = 3;
 
@@ -2565,7 +2533,8 @@ static u32 wave4_vpu_enc_validate_sec_axi(struct vpu_instance *inst, u32 *sec_ax
 	return ret;
 }
 
-int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res)
+int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res,
+		     enum wave4_enc_frame_state *state)
 {
 	u32 src_frame_format;
 	u32 reg_val = 0;
@@ -2580,6 +2549,7 @@ int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *f
 	u32 format_no = WTL_PIXEL_8BIT;
 	int ret;
 
+	*state = W4_ENC_FRAME_NOT_SUBMITTED;
 	temp_base = inst->dev->common_mem.daddr + W4_MAX_CODE_BUF_SIZE;
 
 	vpu_write_reg(inst->dev, W4_BS_START_ADDR, option->pic_stream_buffer_addr);
@@ -2755,11 +2725,11 @@ int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *f
 	vpu_write_reg(inst->dev, W4_CMD_ENC_LONGTERM_PIC, 0);
 	vpu_write_reg(inst->dev, W4_CMD_ENC_SUB_FRAME_SYNC_CONFIG, 0);
 
-	/*
-	 * Wave4 ENC_PIC path is asynchronous like BSP sample flow:
-	 * issue command and consume completion/report in enc_get_result().
-	 */
+	/* A failed BUSY wait does not establish that hardware released buffers. */
+	*state = W4_ENC_FRAME_UNKNOWN;
 	ret = send_firmware_command(inst, W4_DEC_ENC_PIC, false, &reg_val, fail_res);
+	if (!ret)
+		*state = W4_ENC_FRAME_COMPLETE;
 	if (ret == -ETIMEDOUT)
 		return ret;
 
@@ -2986,6 +2956,67 @@ static bool wave4_vpu_enc_check_param_valid(struct vpu_device *vpu_dev,
 	return true;
 }
 
+struct wave4_hevc_level {
+	u32 level;
+	u32 max_luma_ps;
+	u32 max_luma_sr;
+	u32 max_br_main;
+	u32 max_br_high;
+};
+
+/* HEVC Annex A limits; bitrate columns are in kbit/s. */
+static const struct wave4_hevc_level wave4_hevc_levels[] = {
+	{ 10,   36864,    552960,   128,      0 },
+	{ 20,  122880,   3686400,  1500,      0 },
+	{ 21,  245760,   7372800,  3000,      0 },
+	{ 30,  552960,  16588800,  6000,      0 },
+	{ 31,  983040,  33177600, 10000,      0 },
+	{ 40, 2228224,  66846720, 12000,  30000 },
+	{ 41, 2228224, 133693440, 20000,  50000 },
+	{ 50, 8912896, 267386880, 25000, 100000 },
+};
+
+static bool wave4_vpu_enc_check_level(struct vpu_instance *inst,
+				    const struct enc_open_param *open_param)
+{
+	const struct enc_wave_param *param = &open_param->wave_param;
+	const struct wave4_hevc_level *level = NULL;
+	u32 width = ALIGN(open_param->pic_width, 8);
+	u32 height = ALIGN(open_param->pic_height, 8);
+	u32 rate_num = open_param->frame_rate_info & 0xffff;
+	u32 rate_den = (open_param->frame_rate_info >> 16) + 1;
+	u64 luma_ps = (u64)width * height;
+	u32 max_br;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(wave4_hevc_levels); i++) {
+		if (wave4_hevc_levels[i].level == param->level) {
+			level = &wave4_hevc_levels[i];
+			break;
+		}
+	}
+	if (!level)
+		goto invalid;
+
+	max_br = param->tier ? level->max_br_high : level->max_br_main;
+	if (!max_br || luma_ps > level->max_luma_ps ||
+	    (u64)width * width > 8ULL * level->max_luma_ps ||
+	    (u64)height * height > 8ULL * level->max_luma_ps ||
+	    luma_ps * rate_num > (u64)level->max_luma_sr * rate_den)
+		goto invalid;
+
+	/* Main and Main 10 use CpbBrNalFactor = 1100 (HEVC Annex A). */
+	if (open_param->rc_enable && open_param->bit_rate > (u64)max_br * 1100)
+		goto invalid;
+
+	return true;
+
+invalid:
+	dev_err(inst->dev->dev, "Encoding configuration exceeds HEVC level %u, tier %u\n",
+		param->level, param->tier);
+	return false;
+}
+
 int wave4_vpu_enc_check_open_param(struct vpu_instance *inst, struct enc_open_param *open_param)
 {
 	u32 pic_width;
@@ -3040,6 +3071,9 @@ int wave4_vpu_enc_check_open_param(struct vpu_instance *inst, struct enc_open_pa
 			pic_width, pic_height);
 		return -EINVAL;
 	}
+
+	if (!wave4_vpu_enc_check_level(inst, open_param))
+		return -EINVAL;
 
 	if (param->profile) {
 		if (inst->std == W_HEVC_ENC) {
