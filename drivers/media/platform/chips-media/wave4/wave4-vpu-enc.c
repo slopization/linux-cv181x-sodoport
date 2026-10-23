@@ -170,154 +170,40 @@ invalid_state_switch:
 	return -EINVAL;
 }
 
-static void wave4_vpu_enc_src_meta_reset(struct enc_info *p_enc_info)
+static int wave4_vpu_enc_check_result(struct vpu_instance *inst,
+				      const struct enc_param *param,
+				      const struct enc_output_info *info)
 {
-	p_enc_info->src_meta_head = 0;
-	p_enc_info->src_meta_count = 0;
-}
+	if (info->bitstream_buffer != param->pic_stream_buffer_addr ||
+	    info->bitstream_size > param->pic_stream_buffer_size)
+		return -EIO;
 
-static int wave4_vpu_enc_src_meta_push(struct vpu_instance *inst,
-				       const struct vb2_v4l2_buffer *src_buf,
-				       const struct vb2_v4l2_buffer *dst_buf)
-{
-	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
-	struct wave4_enc_src_meta *meta;
-	u32 tail;
+	if (param->src_end_flag)
+		return info->recon_frame_index == RECON_IDX_FLAG_ENC_END ? 0 : -EIO;
 
-	if (WARN_ON(p_enc_info->src_meta_count >= ARRAY_SIZE(p_enc_info->src_meta_fifo)))
-		return -ENOSPC;
+	if ((u32)info->enc_src_idx != param->src_idx)
+		return -EIO;
+	if (info->recon_frame_index >= 0)
+		return (u32)info->recon_frame_index < inst->fbc_buf_count ? 0 : -EIO;
 
-	tail = (p_enc_info->src_meta_head + p_enc_info->src_meta_count) %
-		ARRAY_SIZE(p_enc_info->src_meta_fifo);
-	meta = &p_enc_info->src_meta_fifo[tail];
-	meta->idx = src_buf->vb2_buf.index;
-	meta->dst_idx = dst_buf->vb2_buf.index;
-	meta->timestamp = src_buf->vb2_buf.timestamp;
-	meta->flags = src_buf->flags &
-		(V4L2_BUF_FLAG_TIMECODE | V4L2_BUF_FLAG_TSTAMP_SRC_MASK);
-	if (meta->flags & V4L2_BUF_FLAG_TIMECODE)
-		meta->timecode = src_buf->timecode;
-
-	p_enc_info->src_meta_count++;
-
-	return 0;
-}
-
-static bool wave4_vpu_enc_src_meta_pop(struct enc_info *p_enc_info,
-				       struct wave4_enc_src_meta *meta)
-{
-	if (!p_enc_info->src_meta_count)
-		return false;
-
-	*meta = p_enc_info->src_meta_fifo[p_enc_info->src_meta_head];
-	p_enc_info->src_meta_head = (p_enc_info->src_meta_head + 1) %
-		ARRAY_SIZE(p_enc_info->src_meta_fifo);
-	p_enc_info->src_meta_count--;
-
-	return true;
-}
-
-static bool wave4_vpu_enc_src_meta_drop_last(struct enc_info *p_enc_info,
-					     struct wave4_enc_src_meta *meta)
-{
-	u32 tail;
-
-	if (!p_enc_info->src_meta_count)
-		return false;
-
-	tail = (p_enc_info->src_meta_head + p_enc_info->src_meta_count - 1) %
-		ARRAY_SIZE(p_enc_info->src_meta_fifo);
-	if (meta)
-		*meta = p_enc_info->src_meta_fifo[tail];
-	p_enc_info->src_meta_count--;
-
-	return true;
-}
-
-static void wave4_vpu_enc_complete_src_meta(struct vpu_instance *inst,
-					    const struct wave4_enc_src_meta *meta,
-					    enum vb2_buffer_state state)
-{
-	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
-	struct vb2_buffer *vb;
-	struct vb2_v4l2_buffer *src_buf;
-
-	vb = vb2_get_buffer(v4l2_m2m_get_src_vq(m2m_ctx), meta->idx);
-	if (!vb)
-		return;
-
-	if (vb->state != VB2_BUF_STATE_ACTIVE && vb->state != VB2_BUF_STATE_QUEUED)
-		return;
-
-	src_buf = to_vb2_v4l2_buffer(vb);
-	if (state == VB2_BUF_STATE_DONE)
-		inst->timestamp = meta->timestamp;
-	v4l2_m2m_buf_done(src_buf, state);
-}
-
-static struct vb2_v4l2_buffer *
-wave4_vpu_enc_get_dst_buf_by_idx(struct vpu_instance *inst, s32 idx)
-{
-	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
-	struct vb2_buffer *vb;
-
-	vb = vb2_get_buffer(v4l2_m2m_get_dst_vq(m2m_ctx), idx);
-	if (!vb)
-		return NULL;
-
-	if (vb->state != VB2_BUF_STATE_ACTIVE && vb->state != VB2_BUF_STATE_QUEUED)
-		return NULL;
-
-	return to_vb2_v4l2_buffer(vb);
-}
-
-static void wave4_vpu_enc_complete_dst_meta(struct vpu_instance *inst,
-					    const struct wave4_enc_src_meta *meta,
-					    enum vb2_buffer_state state)
-{
-	struct vb2_v4l2_buffer *dst_buf;
-
-	dst_buf = wave4_vpu_enc_get_dst_buf_by_idx(inst, meta->dst_idx);
-	if (!dst_buf)
-		return;
-
-	if (state != VB2_BUF_STATE_DONE)
-		vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
-	dst_buf->field = V4L2_FIELD_NONE;
-	v4l2_m2m_buf_done(dst_buf, state);
-}
-
-static void wave4_vpu_enc_flush_src_meta(struct vpu_instance *inst,
-					 enum vb2_buffer_state state)
-{
-	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
-	struct wave4_enc_src_meta meta;
-
-	while (wave4_vpu_enc_src_meta_pop(p_enc_info, &meta)) {
-		wave4_vpu_enc_complete_src_meta(inst, &meta, state);
-		wave4_vpu_enc_complete_dst_meta(inst, &meta, state);
-	}
+	/* The exposed IPP mode does not support delayed source ownership. */
+	return info->recon_frame_index == RECON_IDX_FLAG_HEADER_ONLY ? 0 : -EIO;
 }
 
 static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 {
 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
-	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
-	int ret;
-	struct vb2_v4l2_buffer *src_buf;
-	struct vb2_v4l2_buffer *dst_buf;
-	struct wave4_enc_src_meta dropped_meta;
-	struct frame_buffer frame_buf;
-	struct enc_param pic_param;
+	struct vb2_v4l2_buffer *src_buf, *dst_buf;
+	struct enc_output_info output = { 0 };
+	struct frame_buffer frame_buf = { 0 };
+	struct enc_param pic_param = { 0 };
+	struct v4l2_timecode timecode = { 0 };
 	const struct v4l2_format_info *info;
 	u32 stride = inst->src_fmt.plane_fmt[0].bytesperline;
-	u32 luma_size = 0;
-	u32 chroma_size = 0;
-	bool src_meta_armed = false;
+	u32 luma_size = 0, chroma_size = 0, copied_flags = 0;
+	u64 timestamp = 0;
 	bool force_key_frame = false;
-
-	memset(&pic_param, 0, sizeof(struct enc_param));
-	memset(&frame_buf, 0, sizeof(struct frame_buffer));
+	int ret;
 
 	info = v4l2_format_info(inst->src_fmt.pixelformat);
 	if (!info)
@@ -334,24 +220,18 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 	}
 
 	dst_buf = v4l2_m2m_next_dst_buf(m2m_ctx);
-	if (!dst_buf) {
-		dev_dbg(inst->dev->dev, "%s: No destination buffer found\n", __func__);
+	if (!dst_buf)
 		return -EAGAIN;
-	}
 
 	pic_param.pic_stream_buffer_addr =
 		vb2_dma_contig_plane_dma_addr(&dst_buf->vb2_buf, 0);
-	pic_param.pic_stream_buffer_size =
-		vb2_plane_size(&dst_buf->vb2_buf, 0);
+	pic_param.pic_stream_buffer_size = vb2_plane_size(&dst_buf->vb2_buf, 0);
 
 	src_buf = v4l2_m2m_next_src_buf(m2m_ctx);
 	if (!src_buf) {
-		dev_dbg(inst->dev->dev, "%s: No source buffer found\n", __func__);
-		if (m2m_ctx->is_draining) {
-			pic_param.src_end_flag = 1;
-		} else {
+		if (!m2m_ctx->is_draining)
 			return -EAGAIN;
-		}
+		pic_param.src_end_flag = 1;
 	} else {
 		if (inst->src_fmt.num_planes == 1) {
 			frame_buf.buf_y =
@@ -383,288 +263,78 @@ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
 				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 2) +
 				src_buf->vb2_buf.planes[2].data_offset;
 		}
-
 		frame_buf.stride = stride;
 		pic_param.src_idx = src_buf->vb2_buf.index;
-		ret = wave4_vpu_enc_src_meta_push(inst, src_buf, dst_buf);
-		if (ret) {
-			dev_err(inst->dev->dev,
-				"%s: source metadata FIFO overflow, stopping instance\n",
-				__func__);
-			src_buf = v4l2_m2m_src_buf_remove_by_idx(m2m_ctx, src_buf->vb2_buf.index);
-			dst_buf = v4l2_m2m_dst_buf_remove_by_idx(m2m_ctx, dst_buf->vb2_buf.index);
-			if (src_buf)
-				v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
-			if (dst_buf) {
-				vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
-				dst_buf->field = V4L2_FIELD_NONE;
-				v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-			}
-			switch_state(inst, VPU_INST_STATE_STOP);
-			return ret;
-		}
-
-		src_meta_armed = true;
-		src_buf = v4l2_m2m_src_buf_remove_by_idx(m2m_ctx, pic_param.src_idx);
-		dst_buf = v4l2_m2m_dst_buf_remove_by_idx(m2m_ctx, dst_buf->vb2_buf.index);
-		if (!src_buf || !dst_buf) {
-			wave4_vpu_enc_src_meta_drop_last(p_enc_info, NULL);
-			if (src_buf)
-				v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
-			if (dst_buf) {
-				vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
-				dst_buf->field = V4L2_FIELD_NONE;
-				v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-			}
-			dev_warn_ratelimited(inst->dev->dev,
-					     "%s: failed to remove prepared source/destination buffers src=%p dst=%p idx=%u\n",
-					     __func__, src_buf, dst_buf, pic_param.src_idx);
-			switch_state(inst, VPU_INST_STATE_STOP);
-			return -EINVAL;
-		}
+		timestamp = src_buf->vb2_buf.timestamp;
+		copied_flags = src_buf->flags &
+			(V4L2_BUF_FLAG_TIMECODE | V4L2_BUF_FLAG_TSTAMP_SRC_MASK);
+		if (copied_flags & V4L2_BUF_FLAG_TIMECODE)
+			timecode = src_buf->timecode;
 	}
 
 	pic_param.source_frame = &frame_buf;
 	pic_param.code_option.implicit_header_encode = 1;
-	pic_param.code_option.encode_aud = inst->encode_aud;
+	pic_param.code_option.encode_aud = READ_ONCE(inst->encode_aud);
 	if (!pic_param.src_end_flag)
 		force_key_frame = atomic_xchg(&inst->force_key_frame, 0);
 	if (force_key_frame) {
 		pic_param.force_pic_type_enable = 1;
 		pic_param.force_pic_type = 3;
 	}
-	ret = wave4_vpu_enc_start_one_frame(inst, &pic_param, fail_res);
+
+	ret = wave4_vpu_enc_encode_frame(inst, &pic_param, &output, fail_res);
+	if (ret && force_key_frame)
+		atomic_set(&inst->force_key_frame, 1);
+
+	/* Leave never-submitted buffers for the queue-specific STREAMOFF. */
+	if (output.state == W4_ENC_FRAME_NOT_SUBMITTED)
+		return ret;
+
+	if (src_buf)
+		v4l2_m2m_src_buf_remove_by_idx(m2m_ctx, src_buf->vb2_buf.index);
+	v4l2_m2m_dst_buf_remove_by_idx(m2m_ctx, dst_buf->vb2_buf.index);
+
+	if (output.state == W4_ENC_FRAME_UNKNOWN)
+		dev_err(inst->dev->dev, "ENC_PIC completion unknown; DMA quiescence unproven\n");
+	if (!ret)
+		ret = wave4_vpu_enc_check_result(inst, &pic_param, &output);
+
+	dst_buf->vb2_buf.timestamp = timestamp;
+	dst_buf->field = V4L2_FIELD_NONE;
+	dst_buf->flags &= ~(V4L2_BUF_FLAG_TIMECODE | V4L2_BUF_FLAG_TSTAMP_SRC_MASK |
+			    V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
+			    V4L2_BUF_FLAG_BFRAME | V4L2_BUF_FLAG_LAST);
+	dst_buf->flags |= copied_flags;
+	if (copied_flags & V4L2_BUF_FLAG_TIMECODE)
+		dst_buf->timecode = timecode;
+
 	if (ret) {
-		if (force_key_frame)
-			atomic_set(&inst->force_key_frame, 1);
-		if (src_meta_armed &&
-		    wave4_vpu_enc_src_meta_drop_last(p_enc_info, &dropped_meta) &&
-		    dropped_meta.idx != src_buf->vb2_buf.index) {
-			dev_warn_ratelimited(inst->dev->dev,
-					     "%s: source metadata rollback mismatch drop=%d expected=%d\n",
-					     __func__, dropped_meta.idx, src_buf->vb2_buf.index);
-			wave4_vpu_enc_src_meta_reset(p_enc_info);
-		}
-
-		dev_dbg(inst->dev->dev, "%s: wave4_vpu_enc_start_one_frame fail: %d\n",
-			__func__, ret);
-
-		if (*fail_res == W4_SYSERR_QUEUEING_FAIL)
-			ret = -EINVAL;
-
-		switch_state(inst, VPU_INST_STATE_STOP);
-		if (src_meta_armed) {
-			dst_buf->vb2_buf.timestamp = src_buf->vb2_buf.timestamp;
+		if (src_buf)
 			v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
-			vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
-			dst_buf->field = V4L2_FIELD_NONE;
-			v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-		} else {
-			dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
-			if (dst_buf) {
-				dst_buf->vb2_buf.timestamp = 0;
-				vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
-				dst_buf->field = V4L2_FIELD_NONE;
-				v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-			}
-		}
-	} else {
-		dev_dbg(inst->dev->dev, "%s: wave4_vpu_enc_start_one_frame success\n",
-			__func__);
+		vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
+		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+		return ret;
 	}
 
-	return ret;
-}
-
-static void wave4_vpu_enc_put_async_pm(struct vpu_instance *inst)
-{
-	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
-
-	/*
-	 * Async device_run keeps one runtime-PM ref until completion callback.
-	 * Use xchg so stop_streaming and IRQ completion can safely race.
-	 */
-	if (xchg(&p_enc_info->async_pm_ref_held, 0))
-		pm_runtime_put_autosuspend(inst->dev->dev);
-}
-
-static void wave4_vpu_enc_finish_encode(struct vpu_instance *inst)
-{
-	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
-	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
-	struct v4l2_timecode copied_timecode = { 0 };
-	struct wave4_enc_src_meta src_meta;
-	int ret;
-	u32 copied_flags = 0;
-	struct enc_output_info enc_output_info;
-	struct vb2_v4l2_buffer *dst_buf = NULL;
-	bool output_eos;
-	bool have_src_meta = false;
-
-	/*
-	 * Crash-guard: streamoff can race with delayed ENC_PIC completions.
-	 * Once stopping starts, never touch ready queues from this callback.
-	 * Retire tracked in-flight source buffers and exit quietly.
-	 */
-	if (p_enc_info->stop_pending || inst->state != VPU_INST_STATE_PIC_RUN ||
-	    !wave4_vpu_both_queues_are_streaming(inst)) {
-		wave4_vpu_enc_flush_src_meta(inst, VB2_BUF_STATE_ERROR);
-		wave4_vpu_enc_put_async_pm(inst);
-		return;
-	}
-
-	ret = wave4_vpu_enc_get_output_info(inst, &enc_output_info);
-	if (ret) {
-		/*
-		 * Crash-guard: never return here without finishing the mem2mem job.
-		 * Returning early leaves a queued job active and userspace can block
-		 * forever in poll/streamoff (observed as unkillable D-state v4l2-ctl).
-		 */
-		dev_warn_ratelimited(inst->dev->dev,
-				     "%s: vpu_enc_get_output_info fail: %d reason:%u warn:%u; stopping instance\n",
-				     __func__, ret, enc_output_info.error_reason,
-				     enc_output_info.warn_info);
-		/*
-		 * Crash-guard: don't touch source/destination buffer lists here.
-		 * On this error path we can get repeated callbacks without a valid
-		 * report queue entry. Complete tracked in-flight source buffers and
-		 * one pending destination buffer.
-		 */
-		wave4_vpu_enc_flush_src_meta(inst, VB2_BUF_STATE_ERROR);
-		dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
-		if (dst_buf) {
-			vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
-			dst_buf->field = V4L2_FIELD_NONE;
-			v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-		}
-		switch_state(inst, VPU_INST_STATE_STOP);
-		wave4_vpu_enc_put_async_pm(inst);
-		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
-		return;
-	}
-
-	dev_dbg(inst->dev->dev,
-		"%s: pic_type %i recon_idx %i src_idx %i pic_byte %u pts %llu\n",
-		__func__,  enc_output_info.pic_type, enc_output_info.recon_frame_index,
-		enc_output_info.enc_src_idx, enc_output_info.enc_pic_byte, enc_output_info.pts);
-
-	output_eos = enc_output_info.recon_frame_index == RECON_IDX_FLAG_ENC_END;
-	if (!output_eos) {
-		if (!wave4_vpu_enc_src_meta_pop(p_enc_info, &src_meta)) {
-			dev_warn_ratelimited(inst->dev->dev,
-					     "%s: source metadata FIFO empty for src_idx=%d recon_idx=%d; stopping instance\n",
-					     __func__, enc_output_info.enc_src_idx,
-					     enc_output_info.recon_frame_index);
-			dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
-			if (dst_buf) {
-				vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
-				dst_buf->field = V4L2_FIELD_NONE;
-				v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
-			}
-			switch_state(inst, VPU_INST_STATE_STOP);
-			wave4_vpu_enc_put_async_pm(inst);
-			v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
-			return;
-		}
-
-		have_src_meta = true;
-		if (enc_output_info.enc_src_idx != src_meta.idx) {
-			dev_warn_ratelimited(inst->dev->dev,
-					     "%s: source metadata FIFO mismatch fw_src_idx=%d expected_src_idx=%d recon_idx=%d; stopping instance\n",
-					     __func__, enc_output_info.enc_src_idx,
-					     src_meta.idx, enc_output_info.recon_frame_index);
-			wave4_vpu_enc_complete_src_meta(inst, &src_meta, VB2_BUF_STATE_ERROR);
-			wave4_vpu_enc_complete_dst_meta(inst, &src_meta, VB2_BUF_STATE_ERROR);
-			wave4_vpu_enc_flush_src_meta(inst, VB2_BUF_STATE_ERROR);
-			switch_state(inst, VPU_INST_STATE_STOP);
-			wave4_vpu_enc_put_async_pm(inst);
-			v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
-			return;
-		}
-
-		copied_flags = src_meta.flags;
-		if (copied_flags & V4L2_BUF_FLAG_TIMECODE)
-			copied_timecode = src_meta.timecode;
-		wave4_vpu_enc_complete_src_meta(inst, &src_meta, VB2_BUF_STATE_DONE);
-
-		dst_buf = wave4_vpu_enc_get_dst_buf_by_idx(inst, src_meta.dst_idx);
-		if (!dst_buf) {
-			dev_warn_ratelimited(inst->dev->dev,
-					     "%s: destination buffer lookup failed for dst_idx=%d src_idx=%d; stopping instance\n",
-					     __func__, src_meta.dst_idx, src_meta.idx);
-			wave4_vpu_enc_flush_src_meta(inst, VB2_BUF_STATE_ERROR);
-			switch_state(inst, VPU_INST_STATE_STOP);
-			wave4_vpu_enc_put_async_pm(inst);
-			v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
-			return;
-		}
-	}
-
-	if (output_eos) {
-		static const struct v4l2_event vpu_event_eos = {
-			.type = V4L2_EVENT_EOS
-		};
-
-		dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
-		if (!WARN_ON(!dst_buf)) {
-			vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
-			dst_buf->field = V4L2_FIELD_NONE;
-			v4l2_m2m_last_buffer_done(m2m_ctx, dst_buf);
-		}
-
-		v4l2_event_queue_fh(&inst->v4l2_fh, &vpu_event_eos);
-
-		/*
-		 * Drop async ownership before job_finish() wakes the next m2m job.
-		 * Otherwise the next device_run can re-arm ownership while this
-		 * completion path still clears the previous one, losing one ENC_PIC
-		 * completion and stalling poll/select users.
-		 */
-		wave4_vpu_enc_put_async_pm(inst);
-		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
-	} else {
-		if (!dst_buf) {
-			dev_dbg(inst->dev->dev, "No bitstream buffer.");
-			wave4_vpu_enc_put_async_pm(inst);
-			v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
-			return;
-		}
-
-		if (!have_src_meta) {
-			copied_flags = 0;
-			copied_timecode = (struct v4l2_timecode){ 0 };
-		}
-		vb2_set_plane_payload(&dst_buf->vb2_buf, 0, enc_output_info.bitstream_size);
-		dst_buf->vb2_buf.timestamp = inst->timestamp;
-		dst_buf->field = V4L2_FIELD_NONE;
-		dst_buf->flags &= ~(V4L2_BUF_FLAG_TIMECODE | V4L2_BUF_FLAG_TSTAMP_SRC_MASK |
-				    V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
-				    V4L2_BUF_FLAG_BFRAME);
-		dst_buf->flags |= copied_flags;
-		if (copied_flags & V4L2_BUF_FLAG_TIMECODE)
-			dst_buf->timecode = copied_timecode;
-		if (enc_output_info.pic_type == PIC_TYPE_I) {
+	if (src_buf) {
+		inst->timestamp = timestamp;
+		vb2_set_plane_payload(&dst_buf->vb2_buf, 0, output.bitstream_size);
+		if (output.pic_type == PIC_TYPE_I)
 			dst_buf->flags |= V4L2_BUF_FLAG_KEYFRAME;
-		} else if (enc_output_info.pic_type == PIC_TYPE_P) {
+		else if (output.pic_type == PIC_TYPE_P)
 			dst_buf->flags |= V4L2_BUF_FLAG_PFRAME;
-		} else if (enc_output_info.pic_type == PIC_TYPE_B) {
+		else if (output.pic_type == PIC_TYPE_B)
 			dst_buf->flags |= V4L2_BUF_FLAG_BFRAME;
-		}
-
+		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_DONE);
 		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_DONE);
+	} else {
+		static const struct v4l2_event event = { .type = V4L2_EVENT_EOS };
 
-		dev_dbg(inst->dev->dev, "%s: frame_cycle %8u\n",
-			__func__, enc_output_info.frame_cycle);
-
-		/*
-		 * Keep async ownership transitions ordered before scheduling the
-		 * next mem2mem job to avoid races with the IRQ stale-filter.
-		 */
-		wave4_vpu_enc_put_async_pm(inst);
-		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
+		vb2_set_plane_payload(&dst_buf->vb2_buf, 0, 0);
+		v4l2_m2m_last_buffer_done(m2m_ctx, dst_buf);
+		v4l2_event_queue_fh(&inst->v4l2_fh, &event);
 	}
-
-	return;
+	return 0;
 }
 
 static int wave4_vpu_enc_querycap(struct file *file, void *fh, struct v4l2_capability *cap)
@@ -1919,8 +1589,7 @@ static int wave4_vpu_enc_start_streaming(struct vb2_queue *q, unsigned int count
 	bool other_q_streaming;
 	int ret;
 
-	p_enc_info->stop_pending = false;
-	wave4_vpu_enc_put_async_pm(inst);
+	WRITE_ONCE(p_enc_info->stop_pending, false);
 	ret = pm_runtime_resume_and_get(inst->dev->dev);
 	if (ret < 0)
 		return ret;
@@ -2098,59 +1767,21 @@ static void wave4_vpu_enc_stop_streaming(struct vb2_queue *q)
 	struct vpu_instance *inst = vb2_get_drv_priv(q);
 	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
 	int ret;
-	bool check_cmd = true;
 
-	/*
-	 * Note that we don't need m2m_ctx->next_buf_last for this driver, so we
-	 * don't call v4l2_m2m_update_stop_streaming_state().
-	 */
-
-	dev_dbg(inst->dev->dev, "%s: type: %u\n", __func__, q->type);
+	/* M2M cancellation has already waited for the synchronous runner. */
+	WRITE_ONCE(p_enc_info->stop_pending, true);
 	ret = pm_runtime_resume_and_get(inst->dev->dev);
 	if (ret < 0) {
-		wave4_vpu_enc_put_async_pm(inst);
 		if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 			streamoff_output(inst, q);
 		else
 			streamoff_capture(inst, q);
 		return;
 	}
-	p_enc_info->stop_pending = true;
 
-	/*
-	 * Keep the firmware from accepting further work while draining. Only a
-	 * CAPTURE stop resets the session; an OUTPUT stop pauses the stream and
-	 * must keep the firmware state and its reference pictures.
-	 */
 	if (q->type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
 	    wave4_vpu_both_queues_are_streaming(inst))
 		switch_state(inst, VPU_INST_STATE_STOP);
-
-	while (check_cmd && inst->state != VPU_INST_STATE_NONE) {
-		struct queue_status_info q_status;
-		struct enc_output_info enc_output_info;
-
-		wave4_vpu_enc_give_command(inst, ENC_GET_QUEUE_STATUS, &q_status);
-
-		if (q_status.report_queue_count == 0)
-			break;
-
-		if (wave4_vpu_wait_interrupt(inst, VPU_ENC_TIMEOUT) < 0)
-			break;
-
-		if (wave4_vpu_enc_get_output_info(inst, &enc_output_info))
-			dev_dbg(inst->dev->dev, "Getting encoding results from fw, fail\n");
-	}
-
-	/*
-	 * Crash-guard: start_encode() removes one source buffer from m2m ready
-	 * queue and leaves it ACTIVE until finish_encode() reports completion.
-	 * On streamoff races, that callback may never safely consume queues.
-	 * Force-complete all tracked in-flight source buffers here to avoid
-	 * VB2 warning:
-	 * "stop_streaming operation is leaving buffer ... in active state".
-	 */
-	wave4_vpu_enc_flush_src_meta(inst, VB2_BUF_STATE_ERROR);
 
 	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
 		streamoff_output(inst, q);
@@ -2159,7 +1790,6 @@ static void wave4_vpu_enc_stop_streaming(struct vb2_queue *q)
 		wave4_vpu_enc_reset_session(inst);
 	}
 
-	wave4_vpu_enc_put_async_pm(inst);
 	pm_runtime_put_autosuspend(inst->dev->dev);
 }
 
@@ -2190,10 +1820,6 @@ static int wave4_vpu_enc_queue_init(void *priv, struct vb2_queue *src_vq, struct
 	return wave4_vpu_queue_init(priv, src_vq, dst_vq, &wave4_vpu_enc_vb2_ops);
 }
 
-static const struct vpu_instance_ops wave4_vpu_enc_inst_ops = {
-	.finish_process = wave4_vpu_enc_finish_encode,
-};
-
 static void wave4_vpu_enc_device_run(void *priv)
 {
 	struct vpu_instance *inst = priv;
@@ -2202,42 +1828,28 @@ static void wave4_vpu_enc_device_run(void *priv)
 	u32 fail_res = 0;
 	int ret;
 
+	if (READ_ONCE(p_enc_info->stop_pending))
+		goto finish;
 	ret = pm_runtime_resume_and_get(inst->dev->dev);
-	if (ret < 0) {
-		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
-		return;
-	}
-	switch (inst->state) {
-	case VPU_INST_STATE_PIC_RUN:
-		/*
-		 * Arm completion ownership before issuing ENC_PIC.
-		 * Otherwise a very fast completion can race in and get discarded
-		 * before device_run returns, leaking runtime-PM accounting.
-		 */
-		WRITE_ONCE(p_enc_info->async_pm_ref_held, 1);
+	if (ret < 0)
+		goto finish;
 
-		ret = start_encode(inst, &fail_res);
-		if (ret) {
-			if (ret == -EINVAL)
-				dev_err(inst->dev->dev,
-					"Frame encoding on m2m context (%p), fail: %d (res: %d)\n",
-					m2m_ctx, ret, fail_res);
-			else if (ret == -EAGAIN)
-				dev_dbg(inst->dev->dev, "Missing buffers for encode, try again\n");
-			break;
+	if (!READ_ONCE(p_enc_info->stop_pending)) {
+		if (inst->state == VPU_INST_STATE_PIC_RUN) {
+			ret = start_encode(inst, &fail_res);
+			if (ret && ret != -EAGAIN && ret != -ECANCELED) {
+				dev_err(inst->dev->dev, "Encoding failed: %d (%#x)\n",
+					ret, fail_res);
+				switch_state(inst, VPU_INST_STATE_STOP);
+			}
+		} else {
+			WARN(1, "Execution of a job in state %s is invalid.\n",
+			     state_to_str(inst->state));
 		}
-		dev_dbg(inst->dev->dev, "%s: leave with active job", __func__);
-		return;
-	default:
-		WARN(1, "Execution of a job in state %s is invalid.\n",
-		     state_to_str(inst->state));
-		break;
 	}
-	dev_dbg(inst->dev->dev, "%s: leave and finish job", __func__);
-	if (READ_ONCE(p_enc_info->async_pm_ref_held))
-		wave4_vpu_enc_put_async_pm(inst);
-	else
-		pm_runtime_put_autosuspend(inst->dev->dev);
+
+	pm_runtime_put_autosuspend(inst->dev->dev);
+finish:
 	v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
 }
 
@@ -2252,7 +1864,7 @@ static int wave4_vpu_enc_job_ready(void *priv)
 		dev_dbg(inst->dev->dev, "Encoder must be open to start queueing M2M jobs!\n");
 		return false;
 	case VPU_INST_STATE_PIC_RUN:
-		if (p_enc_info->stop_pending)
+		if (READ_ONCE(p_enc_info->stop_pending))
 			return false;
 		if (m2m_ctx->is_draining || v4l2_m2m_num_src_bufs_ready(m2m_ctx)) {
 			dev_dbg(inst->dev->dev, "Encoder ready for a job, state: %s\n",
@@ -2273,21 +1885,10 @@ static int wave4_vpu_enc_job_ready(void *priv)
 static void wave4_vpu_enc_job_abort(void *priv)
 {
 	struct vpu_instance *inst = priv;
-	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
 	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
 
-	/*
-	 * Crash-guard: if a running ENC_PIC job never reports completion,
-	 * v4l2_m2m_cancel_job() waits forever in release/streamoff.
-	 * Force-finish the running m2m job so teardown can proceed.
-	 *
-	 * The instance state is deliberately left alone: a CAPTURE stop resets
-	 * the session, while an OUTPUT-only stop must be able to resume the
-	 * same firmware instance without re-registering its buffers.
-	 */
-	p_enc_info->stop_pending = true;
-	wave4_vpu_enc_put_async_pm(inst);
-	v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
+	/* The runner owns its buffers, PM reference and final M2M handoff. */
+	WRITE_ONCE(p_enc_info->stop_pending, true);
 }
 
 static const struct v4l2_m2m_ops wave4_vpu_enc_m2m_ops = {
@@ -2311,14 +1912,12 @@ static int wave4_vpu_open_enc(struct file *filp)
 
 	inst->dev = dev;
 	inst->type = VPU_INST_TYPE_ENC;
-	inst->ops = &wave4_vpu_enc_inst_ops;
 
 	inst->codec_info = kzalloc_obj(*inst->codec_info);
 	if (!inst->codec_info) {
 		kfree(inst);
 		return -ENOMEM;
 	}
-	wave4_vpu_enc_src_meta_reset(&inst->codec_info->enc_info);
 
 	v4l2_fh_init(&inst->v4l2_fh, vdev);
 	v4l2_fh_add(&inst->v4l2_fh, filp);

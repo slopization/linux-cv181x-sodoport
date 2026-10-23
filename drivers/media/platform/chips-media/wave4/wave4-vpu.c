@@ -130,7 +130,7 @@ static void wave4_vpu_handle_irq(void *dev_id)
 		if (irq_reason & READ_ONCE(inst->command_irq_mask))
 			complete(&inst->command_done);
 
-		if (irq_reason & W4_VPU_INT_PIC_RUN) {
+		if (inst->type != VPU_INST_TYPE_ENC && (irq_reason & W4_VPU_INT_PIC_RUN)) {
 			val = BIT(INT_W4_DEC_PIC);
 			kfifo_in(&inst->irq_status, &val, sizeof(int));
 			complete(&inst->irq_done);
@@ -167,13 +167,8 @@ static irqreturn_t wave4_vpu_irq_thread(int irq, void *dev_id)
 			if (!ret)
 				break;
 
-			/*
-			 * Encoder completion callbacks are valid only while one
-			 * async ENC_PIC job is inflight. Ignore stale/duplicate
-			 * PIC notifications that arrive after job completion.
-			 */
-			if (inst->type == VPU_INST_TYPE_ENC &&
-			    !READ_ONCE(inst->codec_info->enc_info.async_pm_ref_held))
+			/* Encoder pictures are retired by their synchronous runner. */
+			if (inst->type == VPU_INST_TYPE_ENC)
 				continue;
 
 			inst->ops->finish_process(inst);
@@ -223,13 +218,8 @@ static int irq_thread(void *data)
 				if (!ret)
 					break;
 
-				/*
-				 * Encoder completion callbacks are valid only while one
-				 * async ENC_PIC job is inflight. Ignore stale/duplicate
-				 * PIC notifications that arrive after job completion.
-				 */
-				if (inst->type == VPU_INST_TYPE_ENC &&
-				    !READ_ONCE(inst->codec_info->enc_info.async_pm_ref_held))
+				/* Encoder pictures are retired by their synchronous runner. */
+				if (inst->type == VPU_INST_TYPE_ENC)
 					continue;
 
 				inst->ops->finish_process(inst);

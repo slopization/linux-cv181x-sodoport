@@ -112,7 +112,8 @@ int wave4_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *
 				       struct frame_buffer *fb_arr, enum tiled_map_type map_type,
 				       unsigned int count);
 
-int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res);
+int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res,
+		     enum wave4_enc_frame_state *state);
 
 int wave4_vpu_enc_get_result(struct vpu_instance *inst, struct enc_output_info *result);
 

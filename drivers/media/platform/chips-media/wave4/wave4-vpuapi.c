@@ -872,15 +872,22 @@ static int wave4_check_enc_param(struct vpu_instance *inst, struct enc_param *pa
 	return 0;
 }
 
-int wave4_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *param, u32 *fail_res)
+int wave4_vpu_enc_encode_frame(struct vpu_instance *inst, struct enc_param *param,
+			       struct enc_output_info *info, u32 *fail_res)
 {
 	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
-	int ret;
 	struct vpu_device *vpu_dev = inst->dev;
+	int ret;
 
+	if (!info)
+		return -EINVAL;
+
+	memset(info, 0, sizeof(*info));
+	if (!fail_res)
+		return -EINVAL;
 	*fail_res = 0;
 
-	if (p_enc_info->stride == 0) /* this means frame buffers have not been registered. */
+	if (p_enc_info->stride == 0) /* frame buffers have not been registered */
 		return -EINVAL;
 
 	ret = wave4_check_enc_param(inst, param);
@@ -891,37 +898,16 @@ int wave4_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *p
 	if (ret)
 		return ret;
 
-	p_enc_info->pts_map[param->src_idx] = param->pts;
-
-	ret = wave4_vpu_encode(inst, param, fail_res);
-
-	mutex_unlock(&vpu_dev->hw_lock);
-
-	return ret;
-}
-
-int wave4_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *info)
-{
-	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
-	int ret;
-	struct vpu_device *vpu_dev = inst->dev;
-
-	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
-	if (ret)
-		return ret;
-
-	ret = wave4_vpu_enc_get_result(inst, info);
-	info->pts = 0;
-	if (ret)
+	/* Final session cancellation check before touching command registers. */
+	if (READ_ONCE(p_enc_info->stop_pending)) {
+		ret = -ECANCELED;
 		goto unlock;
-
-	if (info->recon_frame_index >= 0) {
-		if ((u32)info->enc_src_idx >= ARRAY_SIZE(p_enc_info->pts_map)) {
-			ret = -EIO;
-			goto unlock;
-		}
-		info->pts = p_enc_info->pts_map[info->enc_src_idx];
 	}
+
+	/* Keep ENC_PIC, its BUSY wait and result snapshot in one transaction. */
+	ret = wave4_vpu_encode(inst, param, fail_res, &info->state);
+	if (!ret)
+		ret = wave4_vpu_enc_get_result(inst, info);
 
 unlock:
 	mutex_unlock(&vpu_dev->hw_lock);

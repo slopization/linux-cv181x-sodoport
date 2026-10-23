@@ -2584,7 +2584,8 @@ static u32 wave4_vpu_enc_validate_sec_axi(struct vpu_instance *inst, u32 *sec_ax
 	return ret;
 }
 
-int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res)
+int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *fail_res,
+		     enum wave4_enc_frame_state *state)
 {
 	u32 src_frame_format;
 	u32 reg_val = 0;
@@ -2599,6 +2600,7 @@ int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *f
 	u32 format_no = WTL_PIXEL_8BIT;
 	int ret;
 
+	*state = W4_ENC_FRAME_NOT_SUBMITTED;
 	temp_base = inst->dev->common_mem.daddr + W4_MAX_CODE_BUF_SIZE;
 
 	vpu_write_reg(inst->dev, W4_BS_START_ADDR, option->pic_stream_buffer_addr);
@@ -2774,11 +2776,11 @@ int wave4_vpu_encode(struct vpu_instance *inst, struct enc_param *option, u32 *f
 	vpu_write_reg(inst->dev, W4_CMD_ENC_LONGTERM_PIC, 0);
 	vpu_write_reg(inst->dev, W4_CMD_ENC_SUB_FRAME_SYNC_CONFIG, 0);
 
-	/*
-	 * Wave4 ENC_PIC path is asynchronous like BSP sample flow:
-	 * issue command and consume completion/report in enc_get_result().
-	 */
+	/* A failed BUSY wait does not establish that hardware released buffers. */
+	*state = W4_ENC_FRAME_UNKNOWN;
 	ret = send_firmware_command(inst, W4_DEC_ENC_PIC, false, &reg_val, fail_res);
+	if (!ret)
+		*state = W4_ENC_FRAME_COMPLETE;
 	if (ret == -ETIMEDOUT)
 		return ret;
 
