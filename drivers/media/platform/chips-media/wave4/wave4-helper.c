@@ -5,6 +5,7 @@
  * Copyright (C) 2021-2023 CHIPS&MEDIA INC
  */
 
+#include <linux/err.h>
 #include <linux/sizes.h>
 
 #include "wave4-helper.h"
@@ -39,6 +40,10 @@ int wave4_kfifo_alloc(struct vpu_instance *inst)
 void wave4_cleanup_instance(struct vpu_instance *inst, struct file *filp)
 {
 	int i;
+
+	if (!IS_ERR_OR_NULL(inst->v4l2_fh.m2m_ctx))
+		v4l2_m2m_ctx_release(inst->v4l2_fh.m2m_ctx);
+	inst->v4l2_fh.m2m_ctx = NULL;
 
 	for (i = 0; i < inst->fbc_buf_count; i++)
 		wave4_vpu_dec_reset_framebuffer(inst, i);
@@ -83,6 +88,7 @@ int wave4_vpu_release_device(struct file *filp,
 	list_del_init(&inst->list);
 	spin_unlock_irqrestore(&inst->dev->irq_spinlock, flags);
 	mutex_unlock(&inst->dev->irq_lock);
+	inst->v4l2_fh.m2m_ctx = NULL;
 	if (inst->state != VPU_INST_STATE_NONE) {
 		u32 fail_res;
 
