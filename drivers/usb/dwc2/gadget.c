@@ -4793,6 +4793,70 @@ static void dwc2_gadget_set_speed(struct usb_gadget *g, enum usb_device_speed sp
 	spin_unlock_irqrestore(&hsotg->lock, flags);
 }
 
+/*
+ * dwc2_hsotg_wakeup - signal remote wakeup to the host
+ * @gadget: The gadget that should wake up its host
+ *
+ * A suspended device may signal resume to the host, but only after the host
+ * enabled it with SET_FEATURE(DEVICE_REMOTE_WAKEUP) and only while the bus is
+ * actually suspended.
+ *
+ * The core has to be brought out of its low-power state first. Both partial
+ * power down and clock gating (PCGCTL.STOPPCLK) leave it unable to drive
+ * resume signalling, so a write to DCTL is silently discarded and the host
+ * never sees anything. The exit calls here are the ones
+ * dwc2_handle_usb_suspend_intr() already makes for a host-initiated resume,
+ * with the same rem_wakeup argument.
+ *
+ * L1 (LPM) suspend is intentionally not handled: the databook requires the
+ * core to have latched GLPMCFG.bRemoteWake in the previous LPM transaction and
+ * clears RMTWKUPSIG itself after TL1DevDrvResume, so it needs a different
+ * sequence. dwc2_wakeup_from_lpm_l1() already owns that path.
+ */
+static int dwc2_hsotg_wakeup(struct usb_gadget *gadget)
+{
+	struct dwc2_hsotg *hsotg = to_hsotg(gadget);
+	unsigned long flags;
+	u32 dctl;
+	int ret = 0;
+
+	spin_lock_irqsave(&hsotg->lock, flags);
+
+	if (!hsotg->remote_wakeup_allowed) {
+		ret = -EOPNOTSUPP;
+		goto out;
+	}
+
+	if (hsotg->lx_state != DWC2_L2) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (hsotg->in_ppd) {
+		ret = dwc2_exit_partial_power_down(hsotg, 1, true);
+		if (ret) {
+			ret = -EIO;
+			goto out;
+		}
+	} else if (hsotg->bus_suspended && !hsotg->params.no_clock_gating) {
+		dwc2_gadget_exit_clock_gating(hsotg, 0);
+	}
+
+	/* RmtWkUpSig must be held for 1-15 ms and then cleared. */
+	dctl = dwc2_readl(hsotg, DCTL);
+	dwc2_writel(hsotg, dctl | DCTL_RMTWKUPSIG, DCTL);
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+
+	usleep_range(2000, 3000);
+
+	spin_lock_irqsave(&hsotg->lock, flags);
+	dwc2_writel(hsotg, dctl & ~DCTL_RMTWKUPSIG, DCTL);
+
+out:
+	spin_unlock_irqrestore(&hsotg->lock, flags);
+	return ret;
+}
+
 static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
 	.get_frame	= dwc2_hsotg_gadget_getframe,
 	.set_selfpowered	= dwc2_hsotg_set_selfpowered,
@@ -4802,6 +4866,7 @@ static const struct usb_gadget_ops dwc2_hsotg_gadget_ops = {
 	.udc_set_speed		= dwc2_gadget_set_speed,
 	.vbus_session		= dwc2_hsotg_vbus_session,
 	.vbus_draw		= dwc2_hsotg_vbus_draw,
+	.wakeup			= dwc2_hsotg_wakeup,
 };
 
 /**
