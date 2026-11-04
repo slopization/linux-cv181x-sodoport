@@ -57,6 +57,16 @@
 			#reset-cells = <1>;
 		};
 
+		watchdog: watchdog@3010000 {
+			compatible = "snps,dw-wdt";
+			reg = <0x03010000 0x100>;
+			/* PLIC interrupt 58, expressed the way this file numbers them */
+			interrupts = <SOC_PERIPHERAL_IRQ(42) IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk CLK_APB_WDT>;
+			resets = <&rst RST_WDT>;
+			status = "disabled";
+		};
+
 		mdio: mdio-mux@3009800 {
 			compatible = "mdio-mux-mmioreg", "mdio-mux";
 			reg = <0x3009800 0x4>;
