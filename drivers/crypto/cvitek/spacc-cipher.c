@@ -10,7 +10,8 @@
 #include <crypto/internal/skcipher.h>
 #include <linux/bottom_half.h>
 #include <linux/dma-mapping.h>
-#include <linux/vmalloc.h>
+#include <linux/mm.h>
+#include <linux/scatterlist.h>
 
 #include "spacc.h"
 
@@ -104,9 +105,27 @@ static int spacc_setkey(struct crypto_skcipher *tfm, const u8 *key,
 }
 
 /*
- * Transform one request.  crypto_engine has made sure no other request is
- * in flight, so the shared descriptor cannot be overwritten here.
+ * The engine takes one contiguous physical range, so the request's own
+ * scatterlist is used directly when dma_map_sg() collapses it into a single
+ * segment; anything else is gathered through the coherent bounce buffer.
+ * crypto_engine guarantees that only one request is in flight, so the shared
+ * descriptor and bounce buffer cannot be overwritten here.
  */
+static void spacc_ctr_advance(u8 *iv, unsigned int bytes)
+{
+	unsigned int blocks = bytes / SPACC_BLOCK_16;
+	unsigned int i = SPACC_MAX_IVLEN;
+	unsigned int carry = blocks;
+
+	/* CTR is a big-endian counter over the whole block. */
+	while (carry && i > 0) {
+		unsigned int v = iv[--i] + (carry & 0xff);
+
+		iv[i] = v;
+		carry = (carry >> 8) + (v >> 8);
+	}
+}
+
 static int spacc_cipher_crypt(struct skcipher_request *req)
 {
 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
@@ -114,7 +133,14 @@ static int spacc_cipher_crypt(struct skcipher_request *req)
 	struct spacc_cipher_reqctx *rctx = skcipher_request_ctx(req);
 	const struct spacc_cipher_alg *alg = ctx->alg;
 	struct spacc_dev *spacc = ctx->spacc;
-	struct skcipher_walk walk;
+	struct scatterlist *src = req->src;
+	struct scatterlist *dst = req->dst;
+
+	if (!dst)
+		dst = src;
+	unsigned int nents_src = sg_nents(src);
+	unsigned int nents_dst = sg_nents(dst);
+	unsigned int len = req->cryptlen;
 	struct spacc_op op = {
 		.ctrl = alg->ctrl | SPACC_CTRL_DESC_KEY,
 		.cipher = alg->mode | ctx->keybits,
@@ -122,8 +148,16 @@ static int spacc_cipher_crypt(struct skcipher_request *req)
 		.keylen = ctx->keylen,
 	};
 	u8 iv[SPACC_MAX_IVLEN];
-	unsigned int nbytes;
-	int err;
+	int mapped_src, mapped_dst;
+	unsigned int offset, chunk;
+	int err = 0;
+
+	if (!len)
+		return 0;
+
+	/* The engine moves whole blocks only. */
+	if (len & (alg->blocksize - 1))
+		return -EINVAL;
 
 	if (rctx->encrypt)
 		op.cipher |= SPACC_CIPHER_ENCRYPT;
@@ -135,82 +169,72 @@ static int spacc_cipher_crypt(struct skcipher_request *req)
 		op.ctrl |= SPACC_CTRL_DESC_IV;
 	}
 
-	err = skcipher_walk_virt(&walk, req, false);
-	while ((nbytes = walk.nbytes)) {
-		void *src = (void *)walk.src.virt.addr;
-		void *dst = walk.dst.virt.addr;
-		dma_addr_t src_dma, dst_dma;
+	mapped_src = dma_map_sg(spacc->dev, src, nents_src, DMA_BIDIRECTIONAL);
+	if (!mapped_src)
+		return -ENOMEM;
 
-		/*
-		 * The engine moves a whole number of blocks and takes a single
-		 * address, so neither a partial block nor a buffer outside the
-		 * linear map can be handed to it.  CTR is a stream mode for the
-		 * crypto API (block size 1), so a tail is possible there.
-		 */
-		if ((nbytes & (alg->blocksize - 1)) || is_vmalloc_addr(src) ||
-		    is_vmalloc_addr(dst)) {
-			err = -EINVAL;
-			break;
-		}
-
-		/*
-		 * Chaining across walked segments needs the hardware to update
-		 * the IV.  Whether it writes the descriptor back is not
-		 * established, so CTR is limited to a single segment.
-		 */
-		if ((alg->mode == SPACC_CIPHER_CTR) && nbytes != req->cryptlen) {
-			err = -EINVAL;
-			break;
-		}
-
-		src_dma = dma_map_single(spacc->dev, src, nbytes,
-					 DMA_BIDIRECTIONAL);
-		if (dma_mapping_error(spacc->dev, src_dma)) {
+	if (dst == src) {
+		mapped_dst = mapped_src;
+	} else {
+		mapped_dst = dma_map_sg(spacc->dev, dst, nents_dst,
+					DMA_BIDIRECTIONAL);
+		if (!mapped_dst) {
 			err = -ENOMEM;
-			break;
+			goto unmap_src;
 		}
+	}
 
-		if (dst == src) {
-			dst_dma = src_dma;
-		} else {
-			dst_dma = dma_map_single(spacc->dev, dst, nbytes,
-						 DMA_BIDIRECTIONAL);
-			if (dma_mapping_error(spacc->dev, dst_dma)) {
-				dma_unmap_single(spacc->dev, src_dma, nbytes,
-						 DMA_BIDIRECTIONAL);
-				err = -ENOMEM;
-				break;
-			}
-		}
-
-		op.src = src_dma;
-		op.dst = dst_dma;
-		op.len = nbytes;
+	/* Fast path: one physically contiguous segment for source and destination. */
+	if (mapped_src == 1 && mapped_dst == 1 &&
+	    sg_dma_len(src) >= len && sg_dma_len(dst) >= len) {
+		op.src = sg_dma_address(src);
+		op.dst = sg_dma_address(dst);
+		op.len = len;
 
 		err = spacc_execute(spacc, &op);
+		goto unmap;
+	}
 
-		if (dst_dma != src_dma)
-			dma_unmap_single(spacc->dev, dst_dma, nbytes,
-					 DMA_BIDIRECTIONAL);
-		dma_unmap_single(spacc->dev, src_dma, nbytes,
-				 DMA_BIDIRECTIONAL);
+	/* Gather path.  The bounce buffer is a multiple of the block size. */
+	for (offset = 0; offset < len; offset += chunk) {
+		chunk = min(len - offset, (unsigned int)SPACC_BOUNCE_SIZE);
 
+		sg_pcopy_to_buffer(src, nents_src, spacc->bounce, chunk, offset);
+
+		op.src = spacc->bounce_dma;
+		op.dst = spacc->bounce_dma;
+		op.len = chunk;
+
+		err = spacc_execute(spacc, &op);
 		if (err)
 			break;
+
+		sg_pcopy_from_buffer(dst, nents_dst, spacc->bounce, chunk,
+				     offset);
 
 		if (alg->mode == SPACC_CIPHER_CBC) {
+			/*
+			 * The next chunk starts from the last ciphertext block,
+			 * which is in the bounce buffer after encryption and in
+			 * the source list after decryption.
+			 */
 			if (rctx->encrypt)
-				memcpy(iv, dst + nbytes - alg->blocksize,
+				memcpy(iv, spacc->bounce + chunk - alg->blocksize,
 				       alg->blocksize);
 			else
-				memcpy(iv, src + nbytes - alg->blocksize,
-				       alg->blocksize);
+				sg_pcopy_to_buffer(src, nents_src, iv,
+						   alg->blocksize,
+						   offset + chunk - alg->blocksize);
+		} else if (alg->mode == SPACC_CIPHER_CTR) {
+			spacc_ctr_advance(iv, chunk);
 		}
-
-		err = skcipher_walk_done(&walk, 0);
-		if (err)
-			break;
 	}
+
+unmap:
+	if (mapped_dst != mapped_src)
+		dma_unmap_sg(spacc->dev, dst, nents_dst, DMA_BIDIRECTIONAL);
+unmap_src:
+	dma_unmap_sg(spacc->dev, src, nents_src, DMA_BIDIRECTIONAL);
 
 	return err;
 }

@@ -71,6 +71,9 @@
 #define SPACC_DMA_DESC_MODE	BIT(1)
 #define SPACC_DMA_ENABLE	BIT(0)
 
+#define SPACC_BOUNCE_SIZE	SZ_64K
+#define SPACC_BLOCK_16		16
+
 #define SPACC_IRQ_BITS		0x3
 #define SPACC_TIMEOUT_MS	1000
 
@@ -85,6 +88,10 @@ struct spacc_dev {
 
 	u32 *desc;
 	dma_addr_t desc_dma;
+
+	/* Gather buffer for requests whose scatterlist is not contiguous. */
+	void *bounce;
+	dma_addr_t bounce_dma;
 
 	struct completion done;
 	bool wedged;

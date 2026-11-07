@@ -31,9 +31,10 @@
 			 * The engine registers, and the sec_top gate below, are
 			 * only reachable once the efuse clocks are running.
 			 */
-			reg = <0x02600000 0x1000>, <0x020b0000 0x4>;
+			reg = <0x02060000 0x1000>, <0x020b0000 0x4>;
 			clocks = <&clk CLK_EFUSE>, <&clk CLK_APB_EFUSE>;
 			clock-names = "efuse", "apb";
+			resets = <&rst RST_EFUSE>;
 			/* PLIC interrupt 91 */
 			interrupts = <SOC_PERIPHERAL_IRQ(75) IRQ_TYPE_LEVEL_HIGH>;
 		};

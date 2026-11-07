@@ -70,7 +70,12 @@ int spacc_execute(struct spacc_dev *spacc, const struct spacc_op *op)
 
 	dma_ctrl = (SPACC_DMA_WRITE_BURST << 24) | (SPACC_DMA_READ_BURST << 16) |
 		   SPACC_DMA_DESC_MODE | SPACC_DMA_ENABLE;
+	dev_info(spacc->dev, "exec: desc=%pad ctrl=%x cipher=%x len=%zu\n",
+		 &spacc->desc_dma, desc[SPACC_DESC_CTRL], desc[SPACC_DESC_CIPHER],
+		 op->len);
 	writel(dma_ctrl, spacc->base + SPACC_REG_DMA_CTRL);
+	dev_info(spacc->dev, "exec: triggered, status=%08x\n",
+		 readl(spacc->base + SPACC_REG_IRQ_STATUS));
 
 	ret = wait_for_completion_timeout(&spacc->done,
 					  msecs_to_jiffies(SPACC_TIMEOUT_MS));
@@ -163,6 +168,16 @@ static int spacc_probe(struct platform_device *pdev)
 		goto err_reset;
 	}
 
+	dev_info(dev, "engine ctrl reads %08x\n",
+		 readl(spacc->base + SPACC_REG_DMA_CTRL));
+
+	spacc->bounce = dma_alloc_coherent(dev, SPACC_BOUNCE_SIZE,
+					   &spacc->bounce_dma, GFP_KERNEL);
+	if (!spacc->bounce) {
+		ret = -ENOMEM;
+		goto err_desc;
+	}
+
 	init_completion(&spacc->done);
 
 	ret = devm_request_irq(dev, irq, spacc_irq, 0, dev_name(dev), spacc);
@@ -209,6 +224,8 @@ static void spacc_remove(struct platform_device *pdev)
 	spacc_cipher_unregister();
 	crypto_engine_stop(spacc->engine);
 	crypto_engine_exit(spacc->engine);
+	dma_free_coherent(spacc->dev, SPACC_BOUNCE_SIZE, spacc->bounce,
+			  spacc->bounce_dma);
 	dma_free_coherent(spacc->dev, SPACC_DESC_WORDS * sizeof(u32),
 			  spacc->desc, spacc->desc_dma);
 	reset_control_assert(spacc->rst);
