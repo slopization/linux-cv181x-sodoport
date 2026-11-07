@@ -505,6 +505,8 @@ if CRYPTO_DEV_CCP
 	source "drivers/crypto/ccp/Kconfig"
 endif
 
+source "drivers/crypto/cvitek/Kconfig"
+
 config CRYPTO_DEV_MXS_DCP
 	tristate "Support for Freescale MXS DCP"
 	depends on (ARCH_MXS || ARCH_MXC)

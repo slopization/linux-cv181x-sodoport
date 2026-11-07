@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config CRYPTO_DEV_SPACC
+	tristate "CVITEK SPACC crypto engine"
+	depends on ARCH_SOPHGO || COMPILE_TEST
+	select CRYPTO_ENGINE
+	help
+	  Support for the CVITEK SPACC crypto engine found in the CV180x and
+	  CV181x SoCs.  The engine performs AES, SM4, DES/3DES and SHA-1/SHA-256
+	  over DMA descriptors.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called spacc.
