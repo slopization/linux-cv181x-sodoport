@@ -25,6 +25,13 @@
 		#size-cells = <1>;
 		ranges;
 
+		spacc: crypto@260000 {
+			compatible = "cvitek,spacc";
+			reg = <0x02600000 0x1000>;
+			/* PLIC interrupt 91 */
+			interrupts = <SOC_PERIPHERAL_IRQ(75) IRQ_TYPE_LEVEL_HIGH>;
+		};
+
 		syscon: syscon@3000000 {
 			compatible = "sophgo,cv1800b-top-syscon",
 				     "syscon", "simple-mfd";
