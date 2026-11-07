@@ -77,7 +77,9 @@
 struct spacc_dev {
 	struct device *dev;
 	void __iomem *base;
-	struct clk *clk;
+	struct clk *clk_efuse;
+	struct clk *clk_apb_efuse;
+	void __iomem *sec_top;
 	struct reset_control *rst;
 	struct crypto_engine *engine;
 

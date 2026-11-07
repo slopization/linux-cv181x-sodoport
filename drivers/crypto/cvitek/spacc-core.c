@@ -103,6 +103,14 @@ static int spacc_probe(struct platform_device *pdev)
 	spacc->dev = dev;
 	platform_set_drvdata(pdev, spacc);
 
+	/*
+	 * The engine addresses memory through 32 bit descriptor fields, so the
+	 * DMA mask has to be set before anything is mapped or allocated.
+	 */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		return ret;
+
 	spacc->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(spacc->base))
 		return PTR_ERR(spacc->base);
@@ -111,13 +119,32 @@ static int spacc_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 
-	spacc->clk = devm_clk_get_optional(dev, NULL);
-	if (IS_ERR(spacc->clk))
-		return PTR_ERR(spacc->clk);
+	spacc->clk_efuse = devm_clk_get_optional(dev, "efuse");
+	if (IS_ERR(spacc->clk_efuse))
+		return PTR_ERR(spacc->clk_efuse);
 
-	ret = clk_prepare_enable(spacc->clk);
+	spacc->clk_apb_efuse = devm_clk_get_optional(dev, "apb");
+	if (IS_ERR(spacc->clk_apb_efuse))
+		return PTR_ERR(spacc->clk_apb_efuse);
+
+	ret = clk_prepare_enable(spacc->clk_efuse);
 	if (ret)
 		return ret;
+
+	ret = clk_prepare_enable(spacc->clk_apb_efuse);
+	if (ret)
+		goto err_efuse_clk;
+
+	/*
+	 * The crypto subsystem is gated in sec_top.  The gate itself is only
+	 * writable with the efuse clocks running, so this has to happen after
+	 * they are enabled.  A zero write leaves the block running.
+	 */
+	spacc->sec_top = devm_platform_ioremap_resource(pdev, 1);
+	if (!IS_ERR(spacc->sec_top))
+		writel(0, spacc->sec_top);
+	else
+		spacc->sec_top = NULL;
 
 	spacc->rst = devm_reset_control_get_optional_exclusive(dev, NULL);
 	if (IS_ERR(spacc->rst)) {
@@ -168,7 +195,9 @@ err_desc:
 err_reset:
 	reset_control_assert(spacc->rst);
 err_clk:
-	clk_disable_unprepare(spacc->clk);
+	clk_disable_unprepare(spacc->clk_apb_efuse);
+err_efuse_clk:
+	clk_disable_unprepare(spacc->clk_efuse);
 
 	return ret;
 }
@@ -183,7 +212,8 @@ static void spacc_remove(struct platform_device *pdev)
 	dma_free_coherent(spacc->dev, SPACC_DESC_WORDS * sizeof(u32),
 			  spacc->desc, spacc->desc_dma);
 	reset_control_assert(spacc->rst);
-	clk_disable_unprepare(spacc->clk);
+	clk_disable_unprepare(spacc->clk_apb_efuse);
+	clk_disable_unprepare(spacc->clk_efuse);
 }
 
 static const struct of_device_id spacc_of_match[] = {
