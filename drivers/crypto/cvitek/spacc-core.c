@@ -70,12 +70,7 @@ int spacc_execute(struct spacc_dev *spacc, const struct spacc_op *op)
 
 	dma_ctrl = (SPACC_DMA_WRITE_BURST << 24) | (SPACC_DMA_READ_BURST << 16) |
 		   SPACC_DMA_DESC_MODE | SPACC_DMA_ENABLE;
-	dev_info(spacc->dev, "exec: desc=%pad ctrl=%x cipher=%x len=%zu\n",
-		 &spacc->desc_dma, desc[SPACC_DESC_CTRL], desc[SPACC_DESC_CIPHER],
-		 op->len);
 	writel(dma_ctrl, spacc->base + SPACC_REG_DMA_CTRL);
-	dev_info(spacc->dev, "exec: triggered, status=%08x\n",
-		 readl(spacc->base + SPACC_REG_IRQ_STATUS));
 
 	ret = wait_for_completion_timeout(&spacc->done,
 					  msecs_to_jiffies(SPACC_TIMEOUT_MS));
@@ -167,9 +162,6 @@ static int spacc_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto err_reset;
 	}
-
-	dev_info(dev, "engine ctrl reads %08x\n",
-		 readl(spacc->base + SPACC_REG_DMA_CTRL));
 
 	spacc->bounce = dma_alloc_coherent(dev, SPACC_BOUNCE_SIZE,
 					   &spacc->bounce_dma, GFP_KERNEL);
